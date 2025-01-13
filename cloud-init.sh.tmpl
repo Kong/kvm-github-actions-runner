@@ -4,6 +4,7 @@ if [[ $(whoami) == root ]]; then
         # temporary hack to disable coredump to prevent OOM
         systemctl mask systemd-coredump.socket
         systemctl daemon-reload
+        systemctl stop systemd-coredump.socket
 
 	echo "Respawning myself as non root"
 	chmod 777 $0 # yay
