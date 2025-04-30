@@ -159,7 +159,7 @@ provision_duration_ms=$(awk '{print $1*1000}' /proc/uptime)
 send_metrics runner.provision_duration $provision_duration_ms "ms|@1"
 
 IFS=$'\r\n'
-./run.sh | grep -vE '^[ \t\-\|/_\\()]*$' | while read line; do
+./run.sh | grep -vE "^[ \t|/_\\()\-\',\.]*$"| grep -v 'Self-hosted runner registration' | while read line; do
 	echo $line
 	if echo $line | grep -q "Running job: "; then
 		start_time_ms=$(date +%s%3N)
