@@ -115,7 +115,7 @@ IFS=$'\r\n'
 	--labels "${LABELS}" \
 	--runnergroup "${RUNNERGROUP}" \
 	--url "${URL}" \
-	--token "${TOKEN}" | grep -vE "^['[:space:].,()/|_-]*$" | grep -vF 'Self-hosted runner registration' | while read line; do
+	--token "${TOKEN}" | grep -vE "^[ \t|/_\\()',\.\-]*$"| grep -vF 'Self-hosted runner registration' | while read line; do
 		echo $line
 		send_logs runner_log $line
 done
@@ -159,7 +159,7 @@ provision_duration_ms=$(awk '{print $1*1000}' /proc/uptime)
 send_metrics runner.provision_duration $provision_duration_ms "ms|@1"
 
 IFS=$'\r\n'
-./run.sh | grep -vE "^['[:space:].,()/|_-]*$" | grep -vF 'Self-hosted runner registration' | while read line; do
+./run.sh | grep -vE "^[ \t|/_\\()',\.\-]*$"| grep -vF 'Self-hosted runner registration' | while read line; do
 	echo $line
 	if echo $line | grep -q "Running job: "; then
 		start_time_ms=$(date +%s%3N)
