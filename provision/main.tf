@@ -30,8 +30,22 @@ resource "libvirt_network" "kong" {
   mode   = "nat"
   domain = "ci.konghq.com.internal"
 
+  dhcp {
+    enabled = true
+  }
+
   dns {
     enabled = true
+    local_only = false
+
+    hosts {
+      hostname = "archive.ubuntu.com"
+      ip       = "37.27.33.247"
+    }
+    hosts {
+      hostname = "security.ubuntu.com"
+      ip       = "37.27.33.247"
+    }
   }
 
   addresses = ["10.1.0.0/24", "${var.ipv6_prefix}:1001::/96"]
