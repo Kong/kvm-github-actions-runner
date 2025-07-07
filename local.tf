@@ -1,5 +1,5 @@
 locals {
-  previous_image_version = "20250406.1"
-  image_version          = "20250504.1"
-  runner_version         = "2.323.0"
+  previous_image_version = "20250504.1"
+  image_version          = "20250629.1"
+  runner_version         = "2.325.0"
 }
