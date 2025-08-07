@@ -162,9 +162,11 @@ IFS=$'\r\n'
 ./run.sh | grep -vE "^[ \t|/_\\()',\.\-]*$"| grep -vF 'Self-hosted runner registration' | while read line; do
 	echo $line
 	if echo $line | grep -q "Running job: "; then
-		start_time_ms=$(date +%s%3N)
+		ts=$(echo $line | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+		start_time_ms=$(date -u -d "$ts" +%s)
 	elif echo $line | grep -q "completed with result: "; then
-		job_duration_ms=$(($(date +%s%3N)-start_time_ms))
+		ts=$(echo $line | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+		job_duration_ms=$(($(date -u -d "$ts" +%s)-start_time_ms))
 		send_metrics jobs.duration $job_duration_ms "ms|@1"
 		send_logs job_duration $job_duration_ms
 	fi
