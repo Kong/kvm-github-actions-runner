@@ -163,10 +163,10 @@ IFS=$'\r\n'
 	echo $line
 	if echo $line | grep -q "Running job: "; then
 		ts=$(echo $line | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z')
-		start_time_ms=$(date -u -d "${ts/Z/}" +%s%3N)
+		start_time_ms=$(date -u -d "$ts" +%s)
 	elif echo $line | grep -q "completed with result: "; then
 		ts=$(echo $line | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z')
-		job_duration_ms=$(($(date -u -d "${ts/Z/}" +%s%3N)-start_time_ms))
+		job_duration_ms=$(($(date -u -d "$ts" +%s)-start_time_ms))
 		send_metrics jobs.duration $job_duration_ms "ms|@1"
 		send_logs job_duration $job_duration_ms
 	fi
