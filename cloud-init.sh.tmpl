@@ -96,20 +96,25 @@ if [[ $ARCH == "x86_64" ]]; then ARCH=x64
 else ARCH=arm64
 fi
 
-echo "#!/bin/bash" > start.sh
-echo 'date +%s%3N > /tmp/job_start.ts' >> start.sh
-echo "#!/bin/bash" > stop.sh
-echo 'now_ts=$(date +%s%3N)' >> stop.sh
-echo 'start_ts=$(cat /tmp/job_start.ts)' >> stop.sh
-echo 'job_duration_ms=$((now_ts - start_ts))' >> stop.sh
-echo 'function send_metrics() {' >> stop.sh
-echo 'metrics="github.actions.$1:$${2:-1}|$${3:-c}|#runner_group:'"${RUNNERGROUP}"',#runner_image_version:'"$runner_image_version"',#cloud_image_serial:'"$cloud_image_serial"'"' >> stop.sh
-echo 'metrics=$metrics,#repo:$GITHUB_REPOSITORY,#ref:$GITHUB_REF,#workflow:$GITHUB_WORKFLOW,#job:$GITHUB_JOB,#arch:'"$ARCH" >> stop.sh
-echo 'echo "Send metrics $metrics to '"$dd_host"'"' >> stop.sh
-echo 'echo -n "$metrics" > /dev/udp/'"$dd_host"'/8125' >> stop.sh
-echo '}' >> stop.sh
-echo 'send_metrics jobs.repo' >> stop.sh
-echo 'send_metrics jobs.duration $job_duration_ms "ms|@1"' >> stop.sh
+cat << 'EOF' > start.sh
+#!/bin/bash
+date +%s%3N > /tmp/job_start.ts
+EOF
+
+cat << EOF > stop.sh
+#!/bin/bash
+now_ts=\$(date +%s%3N)
+start_ts=\$(cat /tmp/job_start.ts)
+job_duration_ms=\$((now_ts - start_ts))
+function send_metrics() {
+  metrics="github.actions.\$1:\$${2:-1}|\$${3:-c}|#runner_group:${RUNNERGROUP},#runner_image_version:$runner_image_version,#cloud_image_serial:$cloud_image_serial"
+  metrics=\$metrics,#repo:\$GITHUB_REPOSITORY,#ref:\$GITHUB_REF,#workflow:\$GITHUB_WORKFLOW,#job:\$GITHUB_JOB,#arch:$ARCH
+  echo "Send metrics \$metrics to $dd_host"
+  echo -n "\$metrics" > /dev/udp/$dd_host/8125
+}
+send_metrics jobs.repo
+send_metrics jobs.duration \$job_duration_ms "ms|@1"
+EOF
 
 curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
 
