@@ -12,6 +12,23 @@ if [[ $(whoami) == root ]]; then
         exec su ubuntu -c "bash $0"
 fi
 
+
+# If the network is still not ready after MAX_WAIT seconds,
+# force a reboot to retry the initialization process.
+MAX_WAIT=120
+WAITED=0
+while ! ip route get 10.1.0.1 >/dev/null 2>&1; do
+  echo "Waiting for network..."
+  sleep 2
+  WAITED=$((WAITED+2))
+  if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+    echo "Network not ready after $MAX_WAIT seconds, rebooting..."
+    sudo shutdown -h now
+    exit 0
+  fi
+done
+
+
 cloud_image_serial=$(cat /etc/cloud/build.info |grep serial|awk '{print $2}')
 runner_image_version=$(cat /imagegeneration/imagedata.json|jq .[1].detail|grep -oP "Version: [\d\.]+"|awk '{print $2}')
 
