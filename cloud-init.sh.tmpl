@@ -1,6 +1,41 @@
 #!/bin/bash -x
 
 if [[ $(whoami) == root ]]; then
+    echo "Applying Network Fix: Detecting interface and ignoring MAC mismatch..."
+
+    ETH_DEV=$(ip -o link show up | awk -F': ' '{print $2}' | grep -vE "^(lo|docker|veth|br|virbr)" | head -n 1)
+
+    echo "Detected primary interface: $ETH_DEV"
+
+    if [[ -z "$ETH_DEV" ]]; then
+        echo "WARNING: Could not detect interface, falling back to enp3s0"
+        ETH_DEV="enp3s0"
+    fi
+
+    cat <<EOF > /etc/netplan/99-force-dhcp.yaml
+network:
+  version: 2
+  ethernets:
+    $ETH_DEV:
+      dhcp4: true
+      dhcp6: false
+      match:
+        name: $ETH_DEV
+      set-name: $ETH_DEV
+EOF
+
+    rm -f /etc/netplan/50-cloud-init.yaml
+
+    chmod 600 /etc/netplan/99-force-dhcp.yaml
+    netplan apply
+
+    ip link set $ETH_DEV up
+
+    echo "Waiting for DHCP on $ETH_DEV..."
+    sleep 5
+fi
+
+if [[ $(whoami) == root ]]; then
         # temporary hack to disable coredump to prevent OOM
         systemctl mask systemd-coredump.socket
         systemctl daemon-reload
