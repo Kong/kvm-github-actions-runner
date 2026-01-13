@@ -22,7 +22,7 @@ function do_copy() {
     else
         path=amd64
     fi
-    ssh $dst sudo -E -H rsync -cha rsync://$RUNNER_IMAGE_STORAGE_HOST/build/$path/$(basename $file_name) $file_name
+    ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 $dst sudo -E -H rsync -cha --info=progress2 --timeout=0 --contimeout=0 --verbose rsync://$RUNNER_IMAGE_STORAGE_HOST/build/$path/$(basename $file_name) $file_name
     echo "+ Finished $dst"
 }
 
