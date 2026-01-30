@@ -144,9 +144,21 @@ cd # goto my home
 mkdir actions-runner && cd actions-runner
 
 ARCH=$(arch)
-if [[ $ARCH == "x86_64" ]]; then ARCH=x64
-else ARCH=arm64
-fi
+case $ARCH in
+    x86_64)
+        ARCH="x64"
+        ;;
+    aarch64)
+        ARCH="arm64"
+        ;;
+    s390x)
+        ARCH="s390x"
+        ;;
+    *)
+        echo "Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
 
 cat << 'EOF' > start.sh
 #!/bin/bash
@@ -168,7 +180,11 @@ send_metrics jobs.repo
 send_metrics jobs.duration \$job_duration_ms "ms|@1"
 EOF
 
-curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
+if [[ "$ARCH" == "s390x" ]]; then
+   curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/canonical/github-actions-runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
+else
+   curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
+fi
 
 tar xzf ./actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
 
@@ -233,6 +249,7 @@ send_metrics runner.provision_duration $provision_duration_ms "ms|@1"
 IFS=$'\r\n'
 export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/ubuntu/actions-runner/start.sh
 export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
+export ACTIONS_RUNNER_DISABLE_UPDATE=true
 ./run.sh | grep -vE "^[ \t|/_\\()',\.\-]*$"| grep -vF 'Self-hosted runner registration' | while read line; do
 	echo $line
 	if echo $line | grep -q "Running job: "; then
