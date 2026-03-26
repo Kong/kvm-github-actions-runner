@@ -1,5 +1,5 @@
 #!/bin/bash
-total_runners=${1:-27}
+total_runners=${1:-30}
 image_version=$(cat $(dirname $0)/../local.tf|grep image_version|grep -v previous|cut -d '"' -f2)
 image_arch=${2:-amd64}
 image_version=${3:-$image_version}
@@ -26,6 +26,10 @@ function do_copy() {
     echo "+ Finished $dst"
 }
 
+echo "- Wait for copying to finish"
+
+MAX_JOBS=4
+
 for i in $(seq 1 $total_runners); do
     if [[ $image_arch == "arm64" ]]; then
         dst="runner-arm64-$i"
@@ -34,7 +38,12 @@ for i in $(seq 1 $total_runners); do
     fi
     echo "- Copying $dst"
     do_copy $dst &
+
+    while (( $(jobs -r -p | wc -l) >= MAX_JOBS )); do
+        sleep 2
+    done
 done
 
-echo "- Wait for copying to finish"
+echo "- Waiting for the remaining background jobs to finish..."
 wait
+echo "All copies completed successfully!"
