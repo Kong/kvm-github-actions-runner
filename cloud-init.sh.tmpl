@@ -151,6 +151,10 @@ fi
 cat << 'EOF' > start.sh
 #!/bin/bash
 date +%s%3N > /tmp/job_start.ts
+iface=$(ip -o link show up | awk -F': ' '{print $2}' | grep -vE "^(lo|docker|veth|br|virbr)" | head -n 1)
+echo "$iface" > /tmp/job_iface
+cat /sys/class/net/$iface/statistics/rx_bytes > /tmp/job_rx_bytes
+cat /sys/class/net/$iface/statistics/tx_bytes > /tmp/job_tx_bytes
 EOF
 
 cat << EOF > stop.sh
@@ -158,6 +162,13 @@ cat << EOF > stop.sh
 now_ts=\$(date +%s%3N)
 start_ts=\$(cat /tmp/job_start.ts)
 job_duration_ms=\$((now_ts - start_ts))
+iface=\$(cat /tmp/job_iface)
+rx_start=\$(cat /tmp/job_rx_bytes)
+tx_start=\$(cat /tmp/job_tx_bytes)
+rx_now=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+tx_now=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
+rx_delta=\$((rx_now - rx_start))
+tx_delta=\$((tx_now - tx_start))
 function send_metrics() {
   metrics="github.actions.\$1:\$${2:-1}|\$${3:-c}|#runner_group:${RUNNERGROUP}"
   metrics=\$metrics,#repo:\$GITHUB_REPOSITORY,#workflow:\$GITHUB_WORKFLOW,#job:\$GITHUB_JOB,#arch:$ARCH
@@ -166,6 +177,8 @@ function send_metrics() {
 }
 send_metrics jobs.repo
 send_metrics jobs.duration \$job_duration_ms "ms|@1"
+send_metrics jobs.network.rx_bytes \$rx_delta
+send_metrics jobs.network.tx_bytes \$tx_delta
 EOF
 
 curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
