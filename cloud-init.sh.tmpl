@@ -155,6 +155,13 @@ iface=$(ip -o link show up | awk -F': ' '{print $2}' | grep -vE "^(lo|docker|vet
 echo "$iface" > /tmp/job_iface
 cat /sys/class/net/$iface/statistics/rx_bytes > /tmp/job_rx_bytes
 cat /sys/class/net/$iface/statistics/tx_bytes > /tmp/job_tx_bytes
+
+if [ -x /opt/zeek/bin/zeek ]; then
+  sudo rm -rf /tmp/zeek && sudo mkdir -p /tmp/zeek
+  cd /tmp/zeek
+  sudo /opt/zeek/bin/zeek -i $iface LogAscii::use_json=T -e "redef Log::default_rotation_interval = 0sec;" > /tmp/zeek/zeek.stdout 2>&1 &
+  echo $! | sudo tee /tmp/zeek.pid >/dev/null
+fi
 EOF
 
 cat << EOF > stop.sh
@@ -179,6 +186,38 @@ send_metrics jobs.repo
 send_metrics jobs.duration \$job_duration_ms "ms|@1"
 send_metrics jobs.network.rx_bytes \$rx_delta
 send_metrics jobs.network.tx_bytes \$tx_delta
+
+if [[ -f /tmp/zeek.pid ]]; then
+  sudo kill -TERM \$(cat /tmp/zeek.pid) 2>/dev/null
+  sleep 1
+fi
+
+if [[ -f /tmp/zeek/conn.log ]]; then
+  jq -s -r '
+    (.[0] // []) as \$conns |
+    (.[1] // []) as \$ssls  |
+    (\$ssls | map({(.uid): .server_name}) | add // {}) as \$sni |
+    \$conns
+    | map({
+        domain: (\$sni[.uid] // .["id.resp_h"]),
+        tx_bytes: (.orig_ip_bytes // 0),
+        rx_bytes: (.resp_ip_bytes // 0)
+      })
+    | group_by(.domain)
+    | map({
+        domain: .[0].domain,
+        tx_bytes: (map(.tx_bytes) | add),
+        rx_bytes: (map(.rx_bytes) | add)
+      })
+    | .[]
+    | "\(.domain) \(.tx_bytes) \(.rx_bytes)"
+  ' /tmp/zeek/conn.log /tmp/zeek/ssl.log 2>/dev/null | while read -r domain tx rx; do
+    [[ -z "\$domain" ]] && continue
+    echo "Send bandwidth counter domain=\$domain tx=\$tx rx=\$rx"
+    echo -n "github.actions.bandwidth.tx_bytes:\$tx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
+    echo -n "github.actions.bandwidth.rx_bytes:\$rx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
+  done
+fi
 EOF
 
 curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
