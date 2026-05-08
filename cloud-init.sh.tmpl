@@ -179,6 +179,38 @@ send_metrics jobs.repo
 send_metrics jobs.duration \$job_duration_ms "ms|@1"
 send_metrics jobs.network.rx_bytes \$rx_delta
 send_metrics jobs.network.tx_bytes \$tx_delta
+
+if systemctl is-active --quiet zeek-capture 2>/dev/null; then
+  sudo systemctl stop zeek-capture
+  sleep 1
+fi
+
+if [[ -f /tmp/zeek/conn.log ]]; then
+  jq -s -r '
+    (.[0] // []) as \$conns |
+    (.[1] // []) as \$ssls  |
+    (\$ssls | map({(.uid): .server_name}) | add // {}) as \$sni |
+    \$conns
+    | map({
+        domain: (\$sni[.uid] // .["id.resp_h"]),
+        tx_bytes: (.orig_ip_bytes // 0),
+        rx_bytes: (.resp_ip_bytes // 0)
+      })
+    | group_by(.domain)
+    | map({
+        domain: .[0].domain,
+        tx_bytes: (map(.tx_bytes) | add),
+        rx_bytes: (map(.rx_bytes) | add)
+      })
+    | .[]
+    | "\(.domain) \(.tx_bytes) \(.rx_bytes)"
+  ' /tmp/zeek/conn.log /tmp/zeek/ssl.log 2>/dev/null | while read -r domain tx rx; do
+    [[ -z "\$domain" ]] && continue
+    echo "Send bandwidth counter domain=\$domain tx=\$tx rx=\$rx"
+    echo -n "github.actions.bandwidth.tx_bytes:\$tx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
+    echo -n "github.actions.bandwidth.rx_bytes:\$rx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
+  done
+fi
 EOF
 
 curl -o actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz -L https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-$${ARCH}-${RUNNER_VER}.tar.gz
