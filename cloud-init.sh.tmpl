@@ -172,7 +172,6 @@ tx_delta=\$((tx_now - tx_start))
 function send_metrics() {
   metrics="github.actions.\$1:\$${2:-1}|\$${3:-c}|#runner_group:${RUNNERGROUP}"
   metrics=\$metrics,#repo:\$GITHUB_REPOSITORY,#workflow:\$GITHUB_WORKFLOW,#job:\$GITHUB_JOB,#arch:$ARCH
-  [[ -n "\$4" ]] && metrics="\$metrics,\$4"
   echo "Send metrics \$metrics to $dd_host"
   echo -n "\$metrics" > /dev/udp/$dd_host/8125
 }
@@ -180,25 +179,20 @@ send_metrics jobs.repo
 send_metrics jobs.duration \$job_duration_ms "ms|@1"
 send_metrics jobs.network.rx_bytes \$rx_delta
 send_metrics jobs.network.tx_bytes \$tx_delta
+
 if systemctl is-active --quiet zeek-capture 2>/dev/null; then
   sudo systemctl stop zeek-capture
   sleep 1
 fi
+
 if [[ -f /tmp/zeek/conn.log ]]; then
-  # ssl.log / dns.log may be absent if no TLS/DNS was seen; tolerate that.
-  [[ -f /tmp/zeek/ssl.log ]] || : > /tmp/zeek/ssl.log
-  [[ -f /tmp/zeek/dns.log ]] || : > /tmp/zeek/dns.log
-  jq -s -r \
-    --slurpfile ssls /tmp/zeek/ssl.log \
-    --slurpfile dns  /tmp/zeek/dns.log '
-    # uid -> SNI (from the TLS ClientHello)
-    (\$ssls | map(select(.server_name != null) | {(.uid): .server_name}) | add // {}) as \$sni
-    # answer IP -> queried domain (protocol-independent fallback for non-TLS)
-    | (\$dns
-        | map(select(.answers != null) | .query as \$q | .answers[] | {(tostring): \$q})
-        | add // {}) as \$ip2name
+  jq -s -r '
+    (.[0] // []) as \$conns |
+    (.[1] // []) as \$ssls  |
+    (\$ssls | map({(.uid): .server_name}) | add // {}) as \$sni |
+    \$conns
     | map({
-        domain: (\$sni[.uid] // \$ip2name[.["id.resp_h"]] // .["id.resp_h"]),
+        domain: (\$sni[.uid] // .["id.resp_h"]),
         tx_bytes: (.orig_ip_bytes // 0),
         rx_bytes: (.resp_ip_bytes // 0)
       })
@@ -210,11 +204,11 @@ if [[ -f /tmp/zeek/conn.log ]]; then
       })
     | .[]
     | "\(.domain) \(.tx_bytes) \(.rx_bytes)"
-  ' /tmp/zeek/conn.log 2>/dev/null | while read -r domain tx rx; do
+  ' /tmp/zeek/conn.log /tmp/zeek/ssl.log 2>/dev/null | while read -r domain tx rx; do
     [[ -z "\$domain" ]] && continue
     echo "Send bandwidth counter domain=\$domain tx=\$tx rx=\$rx"
-    send_metrics bandwidth.tx_bytes "\$tx" c "#domain:\$domain"
-    send_metrics bandwidth.rx_bytes "\$rx" c "#domain:\$domain"
+    echo -n "github.actions.bandwidth.tx_bytes:\$tx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
+    echo -n "github.actions.bandwidth.rx_bytes:\$rx|c|#domain:\$domain" > /dev/udp/$dd_host/8125
   done
 fi
 EOF
