@@ -46,6 +46,10 @@ resource "libvirt_network" "kong" {
       hostname = "security.ubuntu.com"
       ip       = "37.27.33.247"
     }
+    hosts {
+      hostname = "ports.ubuntu.com"
+      ip       = "37.27.33.247"
+    }
   }
 
   addresses = ["10.1.0.0/24", "${var.ipv6_prefix}:1001::/96"]
