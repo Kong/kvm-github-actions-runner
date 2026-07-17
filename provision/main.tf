@@ -50,6 +50,16 @@ resource "libvirt_network" "kong" {
       hostname = "ports.ubuntu.com"
       ip       = "37.27.33.247"
     }
+
+    # GHASR-92: point the ghcr pull-through cache hostname at the host gateway
+    # (10.1.0.1). The host runs a registry:2 proxy bound to 10.1.0.1:5556, so
+    # runner VMs pull ghcr images over the internal NAT network instead of
+    # saturating public egress. Flip the CI-side vars.GHCR_REGISTRY back to
+    # ghcr.io to bypass the cache.
+    hosts {
+      hostname = "registry-ghcr.internal"
+      ip       = "10.1.0.1"
+    }
   }
 
   addresses = ["10.1.0.0/24", "${var.ipv6_prefix}:1001::/96"]

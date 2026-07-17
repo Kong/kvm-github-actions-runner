@@ -47,6 +47,11 @@ pushd $REPO_PATH/provision
 $REPO_PATH/provision/apply-changes.sh
 popd
 
+# GHASR-92: the per-host ghcr pull-through cache (bound to 10.1.0.1:5556) is
+# deployed separately from the Kong/docker-pull-cache repo. This repo only wires
+# the runner side: libvirt DNS registry-ghcr.internal -> 10.1.0.1 (provision/main.tf)
+# and the VM insecure-registries entry (cloud-init.sh.tmpl).
+
 # currently not sure about the right approach to make it work under apparmor
 echo 'security_driver ="none"' |sudo tee -a /etc/libvirt/qemu.conf
 
