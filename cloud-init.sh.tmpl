@@ -127,9 +127,17 @@ sudo chmod 777 /var/run/docker.sock
 # existing daemon.json rather than clobbering it.
 echo "Configuring ghcr pull-through cache as insecure registry"
 sudo mkdir -p /etc/docker
-existing_daemon=$(cat /etc/docker/daemon.json 2>/dev/null || echo '{}')
-echo "$existing_daemon" | jq '.["insecure-registries"] = ((.["insecure-registries"] // []) + ["registry-ghcr.internal:5556"] | unique)' | sudo tee /etc/docker/daemon.json > /dev/null
-sudo systemctl restart docker
+existing_daemon=$(cat /etc/docker/daemon.json 2>/dev/null)
+# treat missing/empty/invalid json as {} so a bad file can't wipe the config
+if ! echo "$existing_daemon" | jq -e . >/dev/null 2>&1; then
+	existing_daemon='{}'
+fi
+merged_daemon=$(echo "$existing_daemon" | jq '.["insecure-registries"] = ((.["insecure-registries"] // []) + ["registry-ghcr.internal:5556"] | unique)')
+# only overwrite if jq produced valid output, otherwise leave the file untouched
+if [[ -n "$merged_daemon" ]]; then
+	echo "$merged_daemon" | sudo tee /etc/docker/daemon.json > /dev/null
+	sudo systemctl restart docker
+fi
 # socket perms are reset by the restart above
 sudo chmod 777 /var/run/docker.sock
 
