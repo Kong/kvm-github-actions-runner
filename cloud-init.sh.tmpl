@@ -121,18 +121,29 @@ sudo mount -o remount,defaults,nobarrier / /
 echo "Making docker socket less secure"
 sudo chmod 777 /var/run/docker.sock
 
-# GHASR-92: trust the per-host ghcr pull-through cache. It serves plain HTTP on
-# the internal gateway (registry-ghcr.internal:5556 -> 10.1.0.1, resolved via
-# libvirt DNS), so docker must treat it as an insecure registry. Merge into any
-# existing daemon.json rather than clobbering it.
-echo "Configuring ghcr pull-through cache as insecure registry"
+# GHASR-92 / GHASR-95: trust the two per-host pull-through caches. Both serve
+# plain HTTP on the internal gateway (registry-ghcr.internal:5556 and
+# registry-dockerhub.internal:5555 -> 10.1.0.1, resolved via libvirt DNS), so
+# docker must treat them as insecure registries. Merge into any existing
+# daemon.json rather than clobbering it.
+#
+# The two caches are reached differently:
+#   - ghcr: by rewriting the image name (the Kong-ee vars.GHCR_REGISTRY switch),
+#     so insecure-registries is all docker needs from us.
+#   - Docker Hub: by registry-mirrors, so image names in workflows stay as-is.
+#     Both keys are required — with only registry-mirrors docker does not error,
+#     it silently falls back to upstream and the cache never gets a hit.
+echo "Configuring pull-through caches as insecure registries"
 sudo mkdir -p /etc/docker
 existing_daemon=$(cat /etc/docker/daemon.json 2>/dev/null)
 # treat missing/empty/invalid json as {} so a bad file can't wipe the config
 if ! echo "$existing_daemon" | jq -e . >/dev/null 2>&1; then
 	existing_daemon='{}'
 fi
-merged_daemon=$(echo "$existing_daemon" | jq '.["insecure-registries"] = ((.["insecure-registries"] // []) + ["registry-ghcr.internal:5556"] | unique)')
+merged_daemon=$(echo "$existing_daemon" | jq '
+	.["insecure-registries"] = ((.["insecure-registries"] // []) + ["registry-ghcr.internal:5556", "registry-dockerhub.internal:5555"] | unique)
+	| .["registry-mirrors"] = ((.["registry-mirrors"] // []) + ["http://registry-dockerhub.internal:5555"] | unique)
+')
 # only overwrite if jq produced valid output, otherwise leave the file untouched
 if [[ -n "$merged_daemon" ]]; then
 	echo "$merged_daemon" | sudo tee /etc/docker/daemon.json > /dev/null

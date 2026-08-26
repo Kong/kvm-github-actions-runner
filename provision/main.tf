@@ -60,6 +60,16 @@ resource "libvirt_network" "kong" {
       hostname = "registry-ghcr.internal"
       ip       = "10.1.0.1"
     }
+
+    # GHASR-95: same idea for Docker Hub, second registry:2 proxy on 10.1.0.1:5555.
+    # This one is wired via the VM's daemon.json registry-mirrors (cloud-init.sh.tmpl)
+    # rather than by rewriting image names, so it needs no CI-side switch — which
+    # also means removing this entry alone does not disable it. To bypass the cache,
+    # drop registry-mirrors from the VM daemon.json.
+    hosts {
+      hostname = "registry-dockerhub.internal"
+      ip       = "10.1.0.1"
+    }
   }
 
   addresses = ["10.1.0.0/24", "${var.ipv6_prefix}:1001::/96"]
