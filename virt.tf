@@ -25,10 +25,34 @@ resource "libvirt_domain" "test" {
   xml {
     # patch to use sata controller to compat in arm64
     # https://github.com/dmacvicar/terraform-provider-libvirt/issues/885
-    xslt = var.arm64 ? file("patch-cdrom-sata.xsl") : ""
+    xslt = <<-EOT
+      <?xml version="1.0" ?>
+      <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+        <xsl:template match="node()|@*">
+          <xsl:copy>
+            <xsl:apply-templates select="node()|@*"/>
+          </xsl:copy>
+        </xsl:template>
+
+        <xsl:template match="/domain/features/acpi"/>
+        <xsl:template match="/domain/features/apic"/>
+
+        <xsl:template match="/domain/devices/controller[@type='ide']">
+          <controller type='scsi' model='virtio-scsi' index='0'/>
+        </xsl:template>
+
+        <xsl:template match="/domain/devices/disk[@device='cdrom']/target">
+          <target dev='sda' bus='scsi'/>
+        </xsl:template>
+
+        <xsl:template match="/domain/devices/disk[@device='cdrom']/address"/>
+
+      </xsl:stylesheet>
+    EOT
   }
 
-  machine = var.arm64 ? "virt" : "pc"
+  machine = var.arm64 ? "virt" : "s390-ccw-virtio"
   nvram {
     file     = var.arm64 ? "/usr/share/AAVMF/AAVMF_CODE.fd" : ""
     template = var.arm64 ? "flash1.img" : ""
