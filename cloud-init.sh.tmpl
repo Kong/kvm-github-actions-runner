@@ -85,9 +85,22 @@ function send_logs() {
 
 send_metrics runners.started
 
+# GHASR-97: a booted VM is not a usable runner. This gauge used to report "1"
+# unconditionally, so a VM whose runner never started, or had crashed, still
+# looked healthy to monitoring. Report the liveness of Runner.Listener instead,
+# and emit an explicit 0 rather than going silent so the pool size stays
+# alertable.
+function runner_is_up() {
+	pgrep -f '[R]unner\.Listener' >/dev/null
+}
+
 function send_up_gauge() {
 	while true; do
-		send_metrics runners.up "1" "g" "#runner_name:${NAME}"
+		if runner_is_up; then
+			send_metrics runners.up "1" "g" "#runner_name:${NAME}"
+		else
+			send_metrics runners.up "0" "g" "#runner_name:${NAME}"
+		fi
 		sleep 30
 	done
 }
@@ -261,10 +274,70 @@ trap finish EXIT
 provision_duration_ms=$(awk '{print $1*1000}' /proc/uptime)
 send_metrics runner.provision_duration $provision_duration_ms "ms|@1"
 
+# GHASR-97: Runner.Listener can wedge after it has claimed a job — the process
+# stays alive on an established but dead broker connection, never times out and
+# never retries. GitHub drops the runner on heartbeat timeout, but the host sees
+# the domain as running and never rebuilds it, so the worker is lost for good.
+#
+# Detect that specific state and power off. loop.sh then rebuilds the VM through
+# the same path a normally finished job takes.
+#
+# The two guards below are what keep this from repeating the mistake of the IRQ
+# watchdog it replaces, which could not tell a wedged VM from an idle one:
+#   - only a runner that already claimed a job can wedge this way, so an idle
+#     runner never matches;
+#   - a job genuinely in progress has a Runner.Worker, so it is left alone.
+function runner_watchdog() {
+	diag_dir=/home/ubuntu/actions-runner/_diag
+	stall_limit=600
+
+	while true; do
+		sleep 60
+
+		diag=$(ls -t $diag_dir/Runner_*.log 2>/dev/null | head -n 1)
+		if [[ -z $diag ]]; then
+			continue
+		fi
+
+		if ! grep -q 'Acknowledging runner request' "$diag"; then
+			continue
+		fi
+
+		if pgrep -f '[R]unner\.Worker' >/dev/null; then
+			continue
+		fi
+
+		age=$(( $(date +%s) - $(stat -c %Y "$diag") ))
+		if [[ $age -gt $stall_limit ]]; then
+			send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:listener_stalled"
+			send_logs runner_log "Listener stalled $age seconds after claiming a job, powering off for rebuild"
+			sleep 2 # let the UDP metric leave before the interface goes down
+			sudo poweroff
+			return
+		fi
+	done
+}
+runner_watchdog &
+
+# GHASR-97: the watchdog above only covers a listener that wedges after claiming
+# a job. A listener that never reaches "Listening for Jobs" is equally invisible
+# to the host, so bound the provisioning phase too. A healthy VM gets there in
+# well under a minute, which makes ten minutes a deliberately loose bound.
+function provision_watchdog() {
+	sleep 600
+	if ! grep -qs 'Listening for Jobs' /home/ubuntu/actions-runner/_diag/Runner_*.log; then
+		send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:never_listening"
+		send_logs runner_log "Runner never reached 'Listening for Jobs', powering off for rebuild"
+		sleep 2
+		sudo poweroff
+	fi
+}
+provision_watchdog &
+
 IFS=$'\r\n'
 export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/ubuntu/actions-runner/start.sh
 export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
-./run.sh | grep -vE "^[ \t|/_\\()',\.\-]*$"| grep -vF 'Self-hosted runner registration' | while read line; do
+./run.sh | grep --line-buffered -vE "^[ \t|/_\\()',\.\-]*$"| grep --line-buffered -vF 'Self-hosted runner registration' | while read line; do
 	echo $line
 	if echo $line | grep -q "Running job: "; then
 		ts=$(echo $line | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z')
@@ -272,9 +345,13 @@ export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
 	fi
 	send_logs runner_log $line
 done
+# GHASR-97: capture run.sh's status before anything else runs. This used to read
+# $? after the IFS assignment below, so it was always 0 — jobs.completed always
+# reported success and runner_exit always reported 0, no matter how the runner
+# died. PIPESTATUS[0] is run.sh itself rather than the tail of the pipeline.
+status=$${PIPESTATUS[0]}
 IFS=$' \t\n'
 
-status=$?
 if [[ $status -eq 0 ]]; then send_metrics jobs.completed; fi
 send_logs runner_exit $status
 

@@ -171,7 +171,6 @@ while true; do
 
 	echo "Reg token is obtained using $token_method: $reg_token"
 
-        watch_dog_check=0
         need_respawn=0
 	while [[ $(date +%s) -lt $token_expire ]]; do
                 # check reload flag
@@ -201,25 +200,14 @@ while true; do
                     need_respawn=1
                 fi
 
-                # check health
-                if [[ $(arch) == "x86_64" ]]; then
-                    # note a \x0d exist before the number, use grep to strip it
-                    irq=$(virsh qemu-monitor-command ${namevar}-runner --hmp info irq|cut -d: -f2|sort -nr|head -n1|grep -oP "\d+")
-                    if [[ ! -z $irq && $irq -lt 20 ]]; then
-                        let watch_dog_check=watch_dog_check+1
-                        if [[ $watch_dog_check -gt 120 ]]; then
-                            echo "IRQ is less than 10 for 10 minutes, recreating VM"
-                            echo "Not recreating for testing"
-                            send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:vm_force_recreate" 
-                            do_cleanup
-                            # reset counter
-                            watch_dog_check=0
-                            need_respawn=1
-                        fi
-                    else
-                        watch_dog_check=0
-                    fi
-                fi
+                # Health checking now lives inside the VM, in cloud-init.sh.tmpl.
+                # The IRQ heuristic that used to sit here was x86_64-only and
+                # never fired once (GHASR-97, INC-849: 36h of journal on both
+                # kuma hosts contained zero anomaly metrics), because it could
+                # not distinguish a wedged VM from an idle one. The in-VM
+                # watchdog powers the VM off instead, which surfaces here as
+                # running=false and is rebuilt by the branch below — the same
+                # path a normally finished job takes.
 
                 if [[ $need_respawn -eq 1 ]]; then
 		    # check drain flag
