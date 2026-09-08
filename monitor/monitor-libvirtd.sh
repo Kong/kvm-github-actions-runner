@@ -30,7 +30,7 @@ export
 
 restart_libvirtd() {
     log_message "Attempting to restart libvirtd service"
-    send_metrics runners.anomaly "1" "c" "#type:libvirtd_restarted"
+    send_metrics runners.anomaly "1" "c" "type:libvirtd_restarted"
 
     systemctl restart libvirtd
 

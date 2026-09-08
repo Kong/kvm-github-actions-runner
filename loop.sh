@@ -165,7 +165,7 @@ while true; do
 
 	if [[ -z $reg_token || $reg_token == "null" ]]; then
 		echoerr "Unable to get registration token using $token_method, error was $reg_token_ret"
-                send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:get_token_failed" 
+                send_metrics runners.anomaly "1" "c" "runner_name:${namevar},type:get_token_failed" 
 		exit 1
 	fi
 
@@ -223,7 +223,7 @@ while true; do
 
                     set -x
                     terraform apply -auto-approve $tf_args -var token=$reg_token || (
-                        send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:vm_tfstate_broken";
+                        send_metrics runners.anomaly "1" "c" "runner_name:${namevar},type:vm_tfstate_broken";
                         do_cleanup;
                         terraform apply -auto-approve $tf_args -var token=$reg_token
                     )
