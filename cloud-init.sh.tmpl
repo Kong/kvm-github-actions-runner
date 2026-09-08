@@ -279,27 +279,58 @@ send_metrics runner.provision_duration $provision_duration_ms "ms|@1"
 # never retries. GitHub drops the runner on heartbeat timeout, but the host sees
 # the domain as running and never rebuilds it, so the worker is lost for good.
 #
-# Detect that specific state and power off. loop.sh then rebuilds the VM through
-# the same path a normally finished job takes.
+# Ship the tail of the runner's own log before powering off. The VM is destroyed
+# immediately afterwards, so this is the only chance to learn anything about why
+# it wedged; without it every recycle is a black box.
+function capture_diag() {
+	# quotes and backslashes would break the JSON send_logs builds by hand
+	tail -n 40 "$1" 2>/dev/null | tr -d '"\\' | cut -c1-500 | while read -r l; do
+		send_logs runner_diag "$l"
+	done
+}
+
+# Two situations are handled here, and only one of them acts.
 #
-# The two guards below are what keep this from repeating the mistake of the IRQ
-# watchdog it replaces, which could not tell a wedged VM from an idle one:
-#   - only a runner that already claimed a job can wedge this way, so an idle
-#     runner never matches;
-#   - a job genuinely in progress has a Runner.Worker, so it is left alone.
+# 1. Already claimed a job and then went silent — the INC-849 wedge. The job is
+#    lost either way, since GitHub gives up after exactly ten minutes, so all
+#    that is left to do is recycle the VM and get the capacity back.
+#
+# 2. Lost the broker connection while still idle. In the one wedge captured in
+#    full, the listener logged a connect error and wedged 38 seconds later, on
+#    the job it claimed the instant it reconnected. Recycling at the point of
+#    the error would get ahead of that, and it is tempting: no job has been
+#    claimed yet, so none would be lost.
+#
+#    We do not do it. That same runner had already recovered once from the very
+#    same error — the connect error at 12:32:27 was followed by a successful
+#    reconnect at 12:33:05. So at the moment the error is logged, a blip that
+#    recovers and a blip that goes on to wedge are indistinguishable, and no
+#    refinement of the trigger can separate them. Whether recycling is worth it
+#    depends entirely on what fraction of connect errors end in a wedge, and we
+#    do not know that fraction. Guessing it wrong is expensive: the fleet boots
+#    on the order of 900 VMs an hour, so even a small share of boots hitting a
+#    transient connect error would mean recycling healthy runners constantly.
+#
+#    So this branch counts and captures, and leaves the runner alone. Comparing
+#    the connect_error_seen and listener_stalled rates gives the fraction, and
+#    turning recycling on afterwards is a one-line change backed by data.
+#
+# A job genuinely in progress owns the VM and is never touched, in either case.
 function runner_watchdog() {
 	diag_dir=/home/ubuntu/actions-runner/_diag
 	stall_limit=600
+	# the error line stays in the log forever, so report it once per VM rather
+	# than once per poll, or the rate we are trying to measure is meaningless
+	reported=/tmp/connect-error-reported
 
 	while true; do
-		sleep 60
+		# 38s elapsed between connect error and job claim in the captured wedge.
+		# Polling well inside that is what lets us tell whether the error came
+		# before the claim, which is the population recycling would act on.
+		sleep 10
 
 		diag=$(ls -t $diag_dir/Runner_*.log 2>/dev/null | head -n 1)
 		if [[ -z $diag ]]; then
-			continue
-		fi
-
-		if ! grep -q 'Acknowledging runner request' "$diag"; then
 			continue
 		fi
 
@@ -307,13 +338,21 @@ function runner_watchdog() {
 			continue
 		fi
 
-		age=$(( $(date +%s) - $(stat -c %Y "$diag") ))
-		if [[ $age -gt $stall_limit ]]; then
-			send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:listener_stalled"
-			send_logs runner_log "Listener stalled $age seconds after claiming a job, powering off for rebuild"
-			sleep 2 # let the UDP metric leave before the interface goes down
-			sudo poweroff
-			return
+		if grep -q 'Acknowledging runner request' "$diag"; then
+			age=$(( $(date +%s) - $(stat -c %Y "$diag") ))
+			if [[ $age -gt $stall_limit ]]; then
+				capture_diag "$diag"
+				send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:listener_stalled"
+				send_logs runner_log "Listener stalled $age seconds after claiming a job, powering off for rebuild"
+				sleep 2 # let the UDP metrics leave before the interface goes down
+				sudo poweroff
+				return
+			fi
+		elif [[ ! -e $reported ]] && grep -q 'Runner connect error' "$diag"; then
+			touch $reported
+			capture_diag "$diag"
+			send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:connect_error_seen"
+			send_logs runner_log "Broker connect error while idle, recorded for GHASR-97, no action taken"
 		fi
 	done
 }
