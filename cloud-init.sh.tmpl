@@ -338,7 +338,34 @@ function runner_watchdog() {
 			continue
 		fi
 
+		claimed=0
 		if grep -q 'Acknowledging runner request' "$diag"; then
+			claimed=1
+		fi
+
+		# Counted independently of the claim, on purpose. Reporting it only
+		# while still unclaimed would drop exactly the cases where we noticed
+		# too late, so the count would be biased by the thing it is meant to
+		# measure and a low number could not be told apart from a blind spot.
+		#
+		# in_time vs late is therefore the first question to answer: it is how
+		# often recycling could have run before the job was claimed at all. If
+		# late dominates, no amount of tuning the poll or the trigger wins that
+		# race and the whole approach is dead. A VM that reports one of these
+		# and then listener_stalled is direct evidence for the precursor.
+		if [[ ! -e $reported ]] && grep -q 'Runner connect error' "$diag"; then
+			touch $reported
+			capture_diag "$diag"
+			if [[ $claimed -eq 1 ]]; then
+				send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:connect_error_late"
+				send_logs runner_log "Broker connect error seen only after a job was claimed, too late to act"
+			else
+				send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:connect_error_in_time"
+				send_logs runner_log "Broker connect error seen while idle, recorded for GHASR-99, no action taken"
+			fi
+		fi
+
+		if [[ $claimed -eq 1 ]]; then
 			age=$(( $(date +%s) - $(stat -c %Y "$diag") ))
 			if [[ $age -gt $stall_limit ]]; then
 				capture_diag "$diag"
@@ -348,11 +375,6 @@ function runner_watchdog() {
 				sudo poweroff
 				return
 			fi
-		elif [[ ! -e $reported ]] && grep -q 'Runner connect error' "$diag"; then
-			touch $reported
-			capture_diag "$diag"
-			send_metrics runners.anomaly "1" "c" "#runner_name:${NAME},#type:connect_error_seen"
-			send_logs runner_log "Broker connect error while idle, recorded for GHASR-97, no action taken"
 		fi
 	done
 }
