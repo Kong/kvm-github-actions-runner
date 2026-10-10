@@ -21,6 +21,60 @@ function send_metrics() {
 	echo -n "$metrics" > /dev/udp/$dd_host/8125
 }
 
+# GHASR-99: a guest that never reaches cloud-init (systemd maintenance mode
+# after boot.mount fails) keeps the domain running, so the in-VM watchdogs
+# never start and the host never rebuilds it. Detect that from here.
+guest_probe_interval=60
+guest_unreachable_limit=600
+guest_last_probe=0
+guest_bad_since=0
+
+function guest_is_reachable() {
+	local ip
+	# arp as a fallback so an aged-out lease does not look like a dead guest
+	for src in lease arp; do
+		ip=$(virsh -c qemu:///system domifaddr "${namevar}-runner" --source $src 2>/dev/null |
+			awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -n 1)
+		if [[ -n $ip ]]; then
+			timeout 5 nc -z "$ip" 22 2>/dev/null && return 0
+		fi
+	done
+	return 1
+}
+
+function check_guest_health() {
+	# without nc every guest would look unreachable, so do nothing instead
+	command -v nc >/dev/null 2>&1 || return
+
+	local now=$(date +%s)
+	[[ $((now - guest_last_probe)) -lt $guest_probe_interval ]] && return
+	guest_last_probe=$now
+
+	if [[ $(virsh -c qemu:///system domstate "${namevar}-runner" 2>/dev/null) != "running" ]]; then
+		guest_bad_since=0
+		return
+	fi
+
+	if guest_is_reachable; then
+		guest_bad_since=0
+		return
+	fi
+
+	# first miss only starts the clock, so a booting VM is left alone
+	if [[ $guest_bad_since -eq 0 ]]; then
+		guest_bad_since=$now
+		return
+	fi
+
+	local stalled=$((now - guest_bad_since))
+	if [[ $stalled -gt $guest_unreachable_limit ]]; then
+		echoerr "Guest unreachable for ${stalled}s while the domain is running, rebuilding"
+		send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:guest_unreachable"
+		guest_bad_since=0
+		need_respawn=1
+	fi
+}
+
 source /root/self-hosted-kvm.env && echo "Reloaded env vars" || true
 export
 
@@ -131,6 +185,10 @@ fi
 # remove the -e flag, in case we hit a bug, we don't want to just kill the vm
 set +e
 
+token_backoff_min=5
+token_backoff_max=120
+token_backoff=$token_backoff_min
+
 while true; do
 	token_start=$(date +%s)
 	token_expire=$((token_start + 1700))
@@ -165,10 +223,16 @@ while true; do
 
 	if [[ -z $reg_token || $reg_token == "null" ]]; then
 		echoerr "Unable to get registration token using $token_method, error was $reg_token_ret"
-                send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:get_token_failed" 
-		exit 1
+                send_metrics runners.anomaly "1" "c" "#runner_name:${namevar},#type:get_token_failed"
+		# GHASR-99: exiting here only has systemd restart us into the same
+		# upstream error, so back off in place and leave the VM alone.
+		sleep $token_backoff
+		token_backoff=$((token_backoff * 2))
+		[[ $token_backoff -gt $token_backoff_max ]] && token_backoff=$token_backoff_max
+		continue
 	fi
 
+	token_backoff=$token_backoff_min
 	echo "Reg token is obtained using $token_method: $reg_token"
 
         need_respawn=0
@@ -208,6 +272,7 @@ while true; do
                 # watchdog powers the VM off instead, which surfaces here as
                 # running=false and is rebuilt by the branch below — the same
                 # path a normally finished job takes.
+                check_guest_health
 
                 if [[ $need_respawn -eq 1 ]]; then
 		    # check drain flag
