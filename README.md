@@ -57,12 +57,17 @@ See the [NoCloud data source](https://docs.cloud-init.io/en/latest/reference/dat
 
 The VM registers with `registration.url`, `registration.token`, the supplied
 runner labels, and `--ephemeral`. Broker runner names use the existing
-`<hostname>-<slot>` prefix followed by the broker's job ID and `trace_id`,
-for example `self-hosted-runner-2-worker-1-120283397859-72d3162e-cc78-11e3-81ab-4c9367dc0958`.
+`<hostname>-<slot>` prefix followed by the broker's job ID and the first 18
+characters of `trace_id`, for example
+`self-hosted-runner-2-worker-1-120283397859-72d3162e-cc78-11e3`.
 The trace ID is the GitHub webhook's `X-GitHub-Delivery` GUID. The webhook
 response, queued/pulled payload, Lambda logs, host pull log, and guest logs
-carry the same value. Search this ID in CloudWatch Logs Insights to follow
-the capacity request; SQS redelivery keeps the same trace and runner suffix.
+carry the full value. Search the runner's trace suffix as a substring in
+CloudWatch Logs Insights to find the full ID and follow the capacity request.
+Cloud-init limits the complete runner name to 64 characters, shortening the
+static prefix only if necessary while keeping the job ID and trace suffix.
+It also accepts existing payloads with the previous full-GUID registration
+name. SQS redelivery keeps the same trace and runner suffix.
 The PAT path keeps its original static name. The runner group comes from the host's
 `RUNNERGROUP` through Terraform's `runnergroup` variable; registration, metrics,
 and logs all use that host setting. Lambda does not configure a runner group.

@@ -16,7 +16,7 @@ run "broker_payload_without_guest_mounts" {
       registration = {
         url         = "https://github.com/example-org"
         token       = "test-registration-token"
-        runner_name = "capacity-100-72d3162e-cc78-11e3-81ab-4c9367dc0958"
+        runner_name = "capacity-100-72d3162e-cc78-11e3"
         labels      = ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"]
         ephemeral   = true
       }

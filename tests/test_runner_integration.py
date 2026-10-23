@@ -28,7 +28,7 @@ def payload():
         "job": {"id": 100, "run_id": 200, "name": "build", "workflow_name": "CI"},
         "registration": {"scope": "organization", "url": "https://github.com/example-org",
                          "token": "secret-registration-token", "expires_at": "2099-01-01T00:00:00Z",
-                         "runner_name": f"capacity-100-{TRACE_ID}",
+                         "runner_name": f"capacity-100-{TRACE_ID[:18]}",
                          "labels": ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"], "ephemeral": True},
         "lease": {"receipt_handle": "secret-receipt", "visibility_timeout_seconds": 900},
     }
@@ -195,14 +195,49 @@ def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, bro
     assert ("--no-default-labels" in args) == broker_payload
     for flag, expected in (("--url", "https://github.com/example-org"),
                            ("--token", "secret-registration-token"),
-                           ("--name", f"test-host-worker-1-100-{TRACE_ID}" if broker_payload else "test-host-worker-1")):
+                           ("--name", f"test-host-worker-1-100-{TRACE_ID[:18]}" if broker_payload else "test-host-worker-1")):
         assert args[args.index(flag) + 1] == expected
+    assert len(args[args.index("--name") + 1]) <= 64
     if runner_group:
         assert args[args.index("--runnergroup") + 1] == runner_group
     else:
         assert "--runnergroup" not in args
     assert args[args.index("--labels") + 1] == ",".join(payload()["registration"]["labels"])
     assert "--replace" in args
+
+
+@pytest.mark.parametrize("static_name", ["self-hosted-runner-2-worker-5", "host-" + "x" * 70 + "-worker-600"])
+@pytest.mark.parametrize("trace_source", ["trace_id", "delivery_id", "message_id"])
+def test_guest_runner_name_fits_limit_and_suffix_matches_full_trace_in_lambda_logs(
+        tmp_path, static_name, trace_source):
+    value = payload()
+    trace = "e57f1770-ceb5-11f1-9076-36058c072ea2"
+    value["job"]["id"] = 120302862418
+    value["trace_id"] = value["delivery_id"] = trace
+    value["lease"]["message_id"] = trace
+    if trace_source != "trace_id":
+        value.pop("trace_id")
+    if trace_source == "message_id":
+        value.pop("delivery_id")
+    # Old Lambda responses with a full GUID must also work during rollout.
+    value["registration"]["runner_name"] = "capacity-120302862418-" + trace
+    rendered = render(tmp_path, value)
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"payload": value, "settings": {"runner_name": static_name}}))
+    name_assignment = "RUNNER_NAME=" + rendered.split("RUNNER_NAME=", 1)[1].split("\nRUNNERGROUP=", 1)[0]
+    script = 'payload_file=config.json\n' + name_assignment + '\nprintf "%s" "$RUNNER_NAME"\n'
+    runner_name = bash(script, cwd=tmp_path).stdout
+    suffix = "120302862418-" + trace[:18]
+    assert runner_name == static_name[:63 - len(suffix)] + "-" + suffix
+    assert len(runner_name) <= 64
+    assert not set(runner_name).intersection('\"/:<>\\|*?')
+    if len(static_name) + 1 + len(suffix) <= 64:
+        assert runner_name.startswith(static_name + "-")
+    if trace_source == "trace_id":
+        jq16 = Path.home() / ".cache/kvm-runner-tools/jq-1.6"
+        if jq16.is_file():
+            older = bash('jq() { "' + str(jq16) + '" "$@"; }\n' + script, cwd=tmp_path)
+            assert older.stdout == runner_name
 
 
 def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
@@ -221,7 +256,7 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     assert entry["job"] == value["job"]["name"]
     assert entry["job_id"] == "100"
     assert entry["runner_group"] == "Host Runners"
-    assert entry["runner_name"] == f"test-host-worker-1-100-{TRACE_ID}"
+    assert entry["runner_name"] == f"test-host-worker-1-100-{TRACE_ID[:18]}"
     assert entry["trace_id"] == TRACE_ID
     assert entry["metadata_source"] == "capacity_request"
     assert value["registration"]["token"] not in result.stdout
