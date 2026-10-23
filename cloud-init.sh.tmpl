@@ -90,6 +90,7 @@ JOB_ID=$(jq -r '.payload.job.id // "unknown"' "$payload_file")
 JOB_NAME=$(jq -r '.payload.job.name // "unknown"' "$payload_file")
 WORKFLOW=$(jq -r '.payload.job.workflow_name // "unknown"' "$payload_file")
 CAPACITY_KEY=$(jq -r '.payload.capacity_key // ""' "$payload_file")
+TRACE_ID=$(jq -r '.payload.trace_id // .payload.delivery_id // .payload.lease.message_id // ""' "$payload_file")
 DOCKER_USER=$(jq -r '.settings.docker_user // ""' "$payload_file")
 DOCKER_PASS=$(jq -r '.settings.docker_pass // ""' "$payload_file")
 RUNNER_VER=$(jq -r '.settings.runner_version' "$payload_file")
@@ -110,16 +111,16 @@ function send_logs() {
     entry=$(jq -cn --arg event "$1" --arg detail "$${2:-}" \
         --arg runner "$RUNNER_NAME" --arg group "$RUNNERGROUP" \
         --arg repo "$REPO" --arg job "$JOB_NAME" --arg job_id "$JOB_ID" \
-        --arg workflow "$WORKFLOW" --arg capacity "$CAPACITY_KEY" \
+        --arg workflow "$WORKFLOW" --arg capacity "$CAPACITY_KEY" --arg trace_id "$TRACE_ID" \
         --arg image "$${runner_image_version:-unknown}" --arg serial "$${cloud_image_serial:-unknown}" \
         '{runner_name: $runner, runner_group: $group,
           repo: $repo, job: $job, job_id: $job_id, workflow: $workflow,
           runner_image_version: $image, cloud_image_serial: $serial,
-          capacity_key: $capacity, metadata_source: "capacity_request"} + {($event): $detail}')
+          capacity_key: $capacity, trace_id: $trace_id, metadata_source: "capacity_request"} + {($event): $detail}')
 	echo "Send logs $entry to $dd_host"
 	echo -n "$entry" > /dev/udp/$dd_host/10518
 }
-echo "Repository: $REPO, job: $JOB_NAME, job ID: $JOB_ID"
+echo "Repository: $REPO, job: $JOB_NAME, job ID: $JOB_ID, trace ID: $TRACE_ID"
 
 send_metrics runners.started
 

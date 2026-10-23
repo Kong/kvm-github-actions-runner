@@ -10,12 +10,13 @@ run "broker_payload_without_guest_mounts" {
     runner_payload_b64 = base64encode(jsonencode({
       schema_version = 2
       capacity_key   = "456:300:100:1"
+      trace_id       = "72d3162e-cc78-11e3-81ab-4c9367dc0958"
       repository     = { full_name = "example-org/repo" }
       job            = { id = 100, name = "build" }
       registration = {
         url         = "https://github.com/example-org"
         token       = "test-registration-token"
-        runner_name = "capacity-100-unique"
+        runner_name = "capacity-100-72d3162e-cc78-11e3-81ab-4c9367dc0958"
         labels      = ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"]
         ephemeral   = true
       }

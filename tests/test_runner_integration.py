@@ -17,16 +17,18 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TF = shutil.which("terraform") or str(Path.home() / ".cache/kvm-runner-tools/terraform")
 ISO_TOOLS = Path.home() / ".cache/kvm-runner-tools/genisoimage/usr/bin"
+TRACE_ID = "72d3162e-cc78-11e3-81ab-4c9367dc0958"
 
 
 def payload():
     return {
         "schema_version": 2, "capacity_key": "456:300:100:1", "organization": "example-org", "installation_id": 456,
+        "trace_id": TRACE_ID, "delivery_id": TRACE_ID,
         "runs-on": "ubuntu-latest-kong", "repository": {"full_name": "example-org/repo"},
         "job": {"id": 100, "run_id": 200, "name": "build", "workflow_name": "CI"},
         "registration": {"scope": "organization", "url": "https://github.com/example-org",
                          "token": "secret-registration-token", "expires_at": "2099-01-01T00:00:00Z",
-                         "runner_name": "capacity-100-unique",
+                         "runner_name": f"capacity-100-{TRACE_ID}",
                          "labels": ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"], "ephemeral": True},
         "lease": {"receipt_handle": "secret-receipt", "visibility_timeout_seconds": 900},
     }
@@ -193,7 +195,7 @@ def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, bro
     assert ("--no-default-labels" in args) == broker_payload
     for flag, expected in (("--url", "https://github.com/example-org"),
                            ("--token", "secret-registration-token"),
-                           ("--name", "test-host-worker-1-100-unique" if broker_payload else "test-host-worker-1")):
+                           ("--name", f"test-host-worker-1-100-{TRACE_ID}" if broker_payload else "test-host-worker-1")):
         assert args[args.index(flag) + 1] == expected
     if runner_group:
         assert args[args.index("--runnergroup") + 1] == runner_group
@@ -219,7 +221,8 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     assert entry["job"] == value["job"]["name"]
     assert entry["job_id"] == "100"
     assert entry["runner_group"] == "Host Runners"
-    assert entry["runner_name"] == "test-host-worker-1-100-unique"
+    assert entry["runner_name"] == f"test-host-worker-1-100-{TRACE_ID}"
+    assert entry["trace_id"] == TRACE_ID
     assert entry["metadata_source"] == "capacity_request"
     assert value["registration"]["token"] not in result.stdout
     assert value["lease"]["receipt_handle"] not in result.stdout
@@ -364,7 +367,7 @@ def test_broker_action_retries_are_bounded_and_keep_the_same_receipt(
     assert result.returncode == (0 if succeeds else 1)
     requests = [json.loads(line) for line in (tmp_path / "requests").read_text().splitlines()]
     assert requests == [{"action": action, "runs-on": "ubuntu-latest-kong",
-                         "receipt_handle": "secret-receipt"}] * attempts
+                         "receipt_handle": "secret-receipt", "trace_id": TRACE_ID}] * attempts
     delay_file = tmp_path / "delays"
     delays = [int(line) for line in delay_file.read_text().splitlines()] if delay_file.exists() else []
     assert len(delays) == attempts - 1
