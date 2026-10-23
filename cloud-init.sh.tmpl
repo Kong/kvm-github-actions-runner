@@ -78,7 +78,9 @@ runner_image_version=$(cat /imagegeneration/imagedata.json|jq .[1].detail|grep -
 
 set +x
 payload_file=/home/ubuntu/runner-config.json
-RUNNER_NAME=$(jq -r '.payload.registration.runner_name' "$payload_file")
+RUNNER_NAME=$(jq -r '.settings.runner_name +
+    (if .payload.schema_version == 2 then "-" + (.payload.registration.runner_name | ltrimstr("capacity-"))
+     else "" end)' "$payload_file")
 RUNNERGROUP=$(jq -r '.settings.runner_group // ""' "$payload_file")
 RUNNER_URL=$(jq -r '.payload.registration.url' "$payload_file")
 RUNNER_LABELS=$(jq -r '.payload.registration.labels | join(",")' "$payload_file")

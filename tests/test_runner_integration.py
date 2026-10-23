@@ -41,7 +41,8 @@ def render(tmp_path, value, runner_group=""):
     if not Path(TF).is_file():
         pytest.skip("Terraform is required to render the guest template")
     values = {"CONFIG_B64": base64.b64encode(json.dumps({
-        "payload": value, "settings": {"runner_version": "2.337.0", "runner_group": runner_group}
+        "payload": value, "settings": {"runner_version": "2.337.0", "runner_group": runner_group,
+                                     "runner_name": "test-host-worker-1"}
     }).encode()).decode()}
     values_file = tmp_path / "template-values.json"
     values_file.write_text(json.dumps(values))
@@ -158,18 +159,22 @@ output "media" {
     embedded = re.search(rb"<<'CONFIG'\n(.*?)\nCONFIG", script, re.S).group(1)
     assert json.loads(base64.b64decode(embedded))["payload"] == value
     assert json.loads(base64.b64decode(embedded))["settings"]["runner_group"] == "Host Runners"
+    assert json.loads(base64.b64decode(embedded))["settings"]["runner_name"] == "iso-test"
 
 
 @pytest.mark.parametrize("runner_group", ["Host Runners", ""])
-def test_guest_registration_uses_payload_and_host_group(tmp_path, runner_group):
+@pytest.mark.parametrize("broker_payload", [True, False])
+def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, broker_payload):
     value = payload()
+    if not broker_payload:
+        value.pop("schema_version")
     # A stale broker response must never override the host setting.
     value["registration"]["runner_group"] = "Old Broker Group"
     rendered = render(tmp_path, value, runner_group=runner_group)
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     (bootstrap / "config.json").write_text(json.dumps({
-        "payload": value, "settings": {"runner_group": runner_group},
+        "payload": value, "settings": {"runner_group": runner_group, "runner_name": "test-host-worker-1"},
     }))
     runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(bootstrap / "config.json"))
@@ -183,11 +188,12 @@ def test_guest_registration_uses_payload_and_host_group(tmp_path, runner_group):
     bash(runtime + "\nsend_logs() { :; }\nsend_metrics() { :; }\n" + block,
          cwd=tmp_path)
     args = json.loads((tmp_path / "args.json").read_text())
-    for flag in ("--unattended", "--ephemeral", "--no-default-labels"):
+    for flag in ("--unattended", "--ephemeral"):
         assert flag in args
+    assert ("--no-default-labels" in args) == broker_payload
     for flag, expected in (("--url", "https://github.com/example-org"),
                            ("--token", "secret-registration-token"),
-                           ("--name", "capacity-100-unique")):
+                           ("--name", "test-host-worker-1-100-unique" if broker_payload else "test-host-worker-1")):
         assert args[args.index(flag) + 1] == expected
     if runner_group:
         assert args[args.index("--runnergroup") + 1] == runner_group
@@ -202,7 +208,7 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     value["job"]["name"] = 'build "quoted"\nnext line'
     rendered = render(tmp_path, value, runner_group="Host Runners")
     (tmp_path / "config.json").write_text(json.dumps({
-        "payload": value, "settings": {"runner_group": "Host Runners"},
+        "payload": value, "settings": {"runner_group": "Host Runners", "runner_name": "test-host-worker-1"},
     }))
     runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(tmp_path / "config.json"))
@@ -213,6 +219,7 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     assert entry["job"] == value["job"]["name"]
     assert entry["job_id"] == "100"
     assert entry["runner_group"] == "Host Runners"
+    assert entry["runner_name"] == "test-host-worker-1-100-unique"
     assert entry["metadata_source"] == "capacity_request"
     assert value["registration"]["token"] not in result.stdout
     assert value["lease"]["receipt_handle"] not in result.stdout

@@ -36,6 +36,7 @@ data "cloudinit_config" "main" {
             }
           }))
           settings = {
+            runner_name    = var.name
             runner_group   = var.runnergroup
             docker_user    = var.docker_user
             docker_pass    = var.docker_pass

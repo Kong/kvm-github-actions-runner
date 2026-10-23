@@ -27,8 +27,10 @@ run "broker_payload_without_guest_mounts" {
       !strcontains(data.cloudinit_config.main.rendered, "CONFIG_B64") &&
       strcontains(data.cloudinit_config.main.rendered, "runner-config.json") &&
       jsondecode(base64decode(regex("<<'CONFIG'\n([^\n]+)\nCONFIG", data.cloudinit_config.main.rendered)[0])).settings.runner_group == "Host Runners" &&
+      jsondecode(base64decode(regex("<<'CONFIG'\n([^\n]+)\nCONFIG", data.cloudinit_config.main.rendered)[0])).settings.runner_name == "test-slot" &&
       !strcontains(data.cloudinit_config.main.rendered, "REG_TOKEN_LAMBDA_APIKEY") &&
       length(libvirt_domain.test.filesystem) == 0 &&
+      jsondecode(base64decode(regex("<<'CONFIG'\n([^\n]+)\nCONFIG", data.cloudinit_config.main.rendered)[0])).settings.runner_name == var.name &&
       !strcontains(data.cloudinit_config.main.rendered, "9pnet_virtio")
     )
     error_message = "Render the base64 configuration inside cloud-init without additional mounts."

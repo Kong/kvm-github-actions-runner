@@ -56,7 +56,10 @@ protect those files as credentials.
 See the [NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html).
 
 The VM registers with `registration.url`, `registration.token`, the supplied
-runner name/labels, and `--ephemeral`. The runner group comes from the host's
+runner labels, and `--ephemeral`. Broker runner names use the existing
+`<hostname>-<slot>` prefix followed by the broker's job ID and random suffix,
+for example `self-hosted-runner-2-worker-1-120283397859-89e1e09bcdd3`.
+The PAT path keeps its original static name. The runner group comes from the host's
 `RUNNERGROUP` through Terraform's `runnergroup` variable; registration, metrics,
 and logs all use that host setting. Lambda does not configure a runner group.
 An empty `RUNNERGROUP` omits `--runnergroup`. Broker labels use
