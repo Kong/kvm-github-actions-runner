@@ -26,7 +26,7 @@ def payload():
         "job": {"id": 100, "run_id": 200, "name": "build", "workflow_name": "CI"},
         "registration": {"scope": "organization", "url": "https://github.com/example-org",
                          "token": "secret-registration-token", "expires_at": "2099-01-01T00:00:00Z",
-                         "runner_name": "capacity-100-unique", "runner_group": "Default",
+                         "runner_name": "capacity-100-unique",
                          "labels": ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"], "ephemeral": True},
         "lease": {"receipt_handle": "secret-receipt", "visibility_timeout_seconds": 900},
     }
@@ -37,11 +37,11 @@ def bash(script, env=None, cwd=None, check=True):
                           env={**os.environ, **(env or {})}, cwd=cwd, check=check)
 
 
-def render(tmp_path, value):
+def render(tmp_path, value, runner_group=""):
     if not Path(TF).is_file():
         pytest.skip("Terraform is required to render the guest template")
     values = {"CONFIG_B64": base64.b64encode(json.dumps({
-        "payload": value, "settings": {"runner_version": "2.337.0"}
+        "payload": value, "settings": {"runner_version": "2.337.0", "runner_group": runner_group}
     }).encode()).decode()}
     values_file = tmp_path / "template-values.json"
     values_file.write_text(json.dumps(values))
@@ -127,7 +127,8 @@ output "media" {
 }
 ''')
     (tmp_path / "test.auto.tfvars.json").write_text(json.dumps({
-        "name": "iso-test", "runner_payload_b64": base64.b64encode(json.dumps(value).encode()).decode(),
+        "name": "iso-test", "runnergroup": "Host Runners",
+        "runner_payload_b64": base64.b64encode(json.dumps(value).encode()).decode(),
     }))
     subprocess.run([TF, "init", "-backend=false", "-input=false",
                     "-plugin-dir=" + str(ROOT / ".terraform/providers")],
@@ -156,13 +157,20 @@ output "media" {
     subprocess.run(["bash", "-n"], input=script, capture_output=True, check=True)
     embedded = re.search(rb"<<'CONFIG'\n(.*?)\nCONFIG", script, re.S).group(1)
     assert json.loads(base64.b64decode(embedded))["payload"] == value
+    assert json.loads(base64.b64decode(embedded))["settings"]["runner_group"] == "Host Runners"
 
 
-def test_guest_registration_uses_payload_and_ephemeral_flags(tmp_path):
-    rendered = render(tmp_path, payload())
+@pytest.mark.parametrize("runner_group", ["Host Runners", ""])
+def test_guest_registration_uses_payload_and_host_group(tmp_path, runner_group):
+    value = payload()
+    # A stale broker response must never override the host setting.
+    value["registration"]["runner_group"] = "Old Broker Group"
+    rendered = render(tmp_path, value, runner_group=runner_group)
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
-    (bootstrap / "config.json").write_text(json.dumps({"payload": payload(), "settings": {}}))
+    (bootstrap / "config.json").write_text(json.dumps({
+        "payload": value, "settings": {"runner_group": runner_group},
+    }))
     runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(bootstrap / "config.json"))
     config = tmp_path / "config.sh"
@@ -179,8 +187,12 @@ def test_guest_registration_uses_payload_and_ephemeral_flags(tmp_path):
         assert flag in args
     for flag, expected in (("--url", "https://github.com/example-org"),
                            ("--token", "secret-registration-token"),
-                           ("--name", "capacity-100-unique"), ("--runnergroup", "Default")):
+                           ("--name", "capacity-100-unique")):
         assert args[args.index(flag) + 1] == expected
+    if runner_group:
+        assert args[args.index("--runnergroup") + 1] == runner_group
+    else:
+        assert "--runnergroup" not in args
     assert args[args.index("--labels") + 1] == ",".join(payload()["registration"]["labels"])
     assert "--replace" in args
 
@@ -188,8 +200,10 @@ def test_guest_registration_uses_payload_and_ephemeral_flags(tmp_path):
 def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     value = payload()
     value["job"]["name"] = 'build "quoted"\nnext line'
-    rendered = render(tmp_path, value)
-    (tmp_path / "config.json").write_text(json.dumps({"payload": value, "settings": {}}))
+    rendered = render(tmp_path, value, runner_group="Host Runners")
+    (tmp_path / "config.json").write_text(json.dumps({
+        "payload": value, "settings": {"runner_group": "Host Runners"},
+    }))
     runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(tmp_path / "config.json"))
     runtime = runtime.replace('echo -n "$entry" > /dev/udp/$dd_host/10518', ":")
@@ -198,6 +212,7 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
     assert entry["repo"] == value["repository"]["full_name"]
     assert entry["job"] == value["job"]["name"]
     assert entry["job_id"] == "100"
+    assert entry["runner_group"] == "Host Runners"
     assert entry["metadata_source"] == "capacity_request"
     assert value["registration"]["token"] not in result.stdout
     assert value["lease"]["receipt_handle"] not in result.stdout
@@ -206,8 +221,10 @@ def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
 def test_completion_hook_reads_payload_metadata_and_original_duration(tmp_path):
     value = payload()
     value["job"]["name"] = 'build "quoted"\nnext|line,part'
-    rendered = render(tmp_path, value)
-    (tmp_path / "config.json").write_text(json.dumps({"payload": value}))
+    rendered = render(tmp_path, value, runner_group="Host Runners")
+    (tmp_path / "config.json").write_text(json.dumps({
+        "payload": value, "settings": {"runner_group": "Host Runners"},
+    }))
     (tmp_path / "started").write_text("1000")
     hook = rendered.split("cat << 'EOF' > stop.sh\n", 1)[1].split("\nEOF\n", 1)[0]
     hook = hook.replace("/home/ubuntu/runner-config.json", str(tmp_path / "config.json"))
@@ -225,6 +242,7 @@ def test_completion_hook_reads_payload_metadata_and_original_duration(tmp_path):
         assert "repo:example-org/repo" in packet
         assert 'job:build_"quoted"_next_line_part' in packet
         assert "workflow:CI" in packet and "job_id:100" in packet
+        assert "runner_group:Host_Runners" in packet
         assert "arch:" in packet
         assert "wrong" not in packet
 
@@ -406,6 +424,8 @@ elif tool == 'terraform':
         sys.exit(0)
     if args[0] == 'apply':
         if os.environ['TEST_APPLY_SUCCESS'] != 'true': sys.exit(1)
+        host_vars = next(x for x in args if x.endswith('.tfvars'))
+        assert 'runnergroup="Host Runners"' in pathlib.Path(host_vars).read_text()
         varfile = next(x for x in args if x.endswith('payload.tfvars.json'))
         v = json.loads(pathlib.Path(varfile).read_text())
         assert 'runner_payload_b64' in v
@@ -424,7 +444,7 @@ elif tool == 'sleep':
         path.write_text(fake)
         path.chmod(0o700)
     env = {**os.environ, "PATH": str(bin_dir) + ":" + os.environ["PATH"],
-           "TEST_ROOT": str(tmp_path), "NAME": "test-slot",
+           "TEST_ROOT": str(tmp_path), "NAME": "test-slot", "RUNNERGROUP": "Host Runners",
            "TEST_APPLY_SUCCESS": str(apply_success).lower(),
            "TEST_ACTION_FAILURE": str(action_failure).lower(),
            "RUNS_ON": "ubuntu-latest-kong", "REG_TOKEN_LAMBDA_URL": "https://example.invalid",

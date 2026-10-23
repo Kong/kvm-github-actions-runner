@@ -28,15 +28,15 @@ data "cloudinit_config" "main" {
             repository   = { full_name = "" }
             job          = {}
             registration = {
-              url          = var.url
-              token        = var.token
-              runner_name  = var.name
-              labels       = compact(split(",", var.labels))
-              runner_group = var.runnergroup
-              ephemeral    = true
+              url         = var.url
+              token       = var.token
+              runner_name = var.name
+              labels      = compact(split(",", var.labels))
+              ephemeral   = true
             }
           }))
           settings = {
+            runner_group   = var.runnergroup
             docker_user    = var.docker_user
             docker_pass    = var.docker_pass
             runner_version = local.runner_version

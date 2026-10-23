@@ -5,19 +5,19 @@ run "broker_payload_without_guest_mounts" {
   command = apply
 
   variables {
-    name = "test-slot"
+    name        = "test-slot"
+    runnergroup = "Host Runners"
     runner_payload_b64 = base64encode(jsonencode({
       schema_version = 2
       capacity_key   = "456:300:100:1"
       repository     = { full_name = "example-org/repo" }
       job            = { id = 100, name = "build" }
       registration = {
-        url          = "https://github.com/example-org"
-        token        = "test-registration-token"
-        runner_name  = "capacity-100-unique"
-        runner_group = "Default"
-        labels       = ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"]
-        ephemeral    = true
+        url         = "https://github.com/example-org"
+        token       = "test-registration-token"
+        runner_name = "capacity-100-unique"
+        labels      = ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"]
+        ephemeral   = true
       }
     }))
   }
@@ -26,6 +26,7 @@ run "broker_payload_without_guest_mounts" {
     condition = (
       !strcontains(data.cloudinit_config.main.rendered, "CONFIG_B64") &&
       strcontains(data.cloudinit_config.main.rendered, "runner-config.json") &&
+      jsondecode(base64decode(regex("<<'CONFIG'\n([^\n]+)\nCONFIG", data.cloudinit_config.main.rendered)[0])).settings.runner_group == "Host Runners" &&
       !strcontains(data.cloudinit_config.main.rendered, "REG_TOKEN_LAMBDA_APIKEY") &&
       length(libvirt_domain.test.filesystem) == 0 &&
       !strcontains(data.cloudinit_config.main.rendered, "9pnet_virtio")

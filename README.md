@@ -15,6 +15,7 @@ Configure `/root/self-hosted-kvm.env` with the existing broker URL and pull key:
 REG_TOKEN_LAMBDA_URL='https://your-function.lambda-url.eu-central-1.on.aws'
 REG_TOKEN_LAMBDA_APIKEY='<existing-pull-api-key>'
 RUNS_ON='ubuntu-latest-kong'
+RUNNERGROUP='<existing-runner-group>'
 DOCKER_USER='<docker-user>'
 DOCKER_PASS='<docker-password>'
 CPU=2
@@ -55,7 +56,10 @@ protect those files as credentials.
 See the [NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html).
 
 The VM registers with `registration.url`, `registration.token`, the supplied
-runner name/group/labels, and `--ephemeral`. Broker labels use
+runner name/labels, and `--ephemeral`. The runner group comes from the host's
+`RUNNERGROUP` through Terraform's `runnergroup` variable; registration, metrics,
+and logs all use that host setting. Lambda does not configure a runner group.
+An empty `RUNNERGROUP` omits `--runnergroup`. Broker labels use
 `--no-default-labels` because the payload already includes the complete label
 set. The token is an ordinary registration token; it is not a JIT configuration
 or a removal token. The old retry that registered without `--ephemeral` and
@@ -138,7 +142,7 @@ cat << EOF > /root/self-hosted-kvm.env
 GITHUB_TOKEN=<token with repo scope for repo runner, or admin:org for org runner>
 OWNER=<org; owner/repo; enterprises/xx-inc >
 LABELS=ubuntu-24.04-kong,ubuntu-latest-kong
-RUNNERGROUP=awesome group
+RUNNERGROUP='awesome group'
 RUNNER_VERSION=2.303.0
 DOCKER_USER=<docker user that access to public registry, to increase pull rate limit only>
 DOCKER_PASS=<the password>
