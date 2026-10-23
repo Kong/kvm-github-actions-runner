@@ -22,14 +22,27 @@ data "cloudinit_config" "main" {
     content = templatefile(
       "${path.module}/cloud-init.sh.tmpl",
       {
-        URL         = var.url
-        TOKEN       = var.token
-        NAME        = var.name
-        LABELS      = var.labels
-        RUNNERGROUP = var.runnergroup
-        DOCKER_USER = var.docker_user
-        DOCKER_PASS = var.docker_pass
-        RUNNER_VER  = local.runner_version
+        CONFIG_B64 = base64encode(jsonencode({
+          payload = jsondecode(var.runner_payload_b64 != "" ? base64decode(var.runner_payload_b64) : jsonencode({
+            capacity_key = ""
+            repository   = { full_name = "" }
+            job          = {}
+            registration = {
+              url         = var.url
+              token       = var.token
+              runner_name = var.name
+              labels      = compact(split(",", var.labels))
+              ephemeral   = true
+            }
+          }))
+          settings = {
+            runner_name    = var.name
+            runner_group   = var.runnergroup
+            docker_user    = var.docker_user
+            docker_pass    = var.docker_pass
+            runner_version = local.runner_version
+          }
+        }))
       }
     )
   }

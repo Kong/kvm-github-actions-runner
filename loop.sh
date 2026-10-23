@@ -1,4 +1,5 @@
 #!/bin/bash -e
+umask 077
 
 function echoerr() {
     printf '%s %s\n' "ERROR" "$@" 1>&2;
@@ -22,10 +23,67 @@ function send_metrics() {
 }
 
 source /root/self-hosted-kvm.env && echo "Reloaded env vars" || true
-export
 
+broker_enabled=false
 if [[ -n $REG_TOKEN_LAMBDA_URL && -n $REG_TOKEN_LAMBDA_APIKEY ]]; then
-	echo "Using lambda to get reg token"
+    broker_enabled=true
+    broker_url=$REG_TOKEN_LAMBDA_URL
+    broker_url=${broker_url%/}
+    [[ $broker_url == */pull ]] || broker_url=$broker_url/pull
+    RUNS_ON=${RUNS_ON:-$(printf '%s' "$LABELS" | tr ',' '\n' | grep -Ex 'ubuntu-latest-kong|ubuntu-latest-arm64-kong')}
+    case "$RUNS_ON" in
+        ubuntu-latest-kong|ubuntu-latest-arm64-kong) ;;
+        *) echoerr 'Set RUNS_ON to exactly one supported label'; exit 1 ;;
+    esac
+fi
+
+function broker_backoff() {
+    delay=$((2 + RANDOM % 7))
+    echo "Retrying in $delay seconds"
+    sleep "$delay"
+}
+
+function broker_action() {
+    local code curl_status attempt delay
+    for ((attempt=1; attempt<=5; attempt++)); do
+        code=$(jq -c --arg action "$1" \
+            '{action: $action, "runs-on": .["runs-on"], receipt_handle: .lease.receipt_handle}' "$payload_file" |
+            curl -sS --connect-timeout 5 --max-time 100 -H "apikey: $REG_TOKEN_LAMBDA_APIKEY" \
+                -H 'Content-Type: application/json' --data-binary @- -o /dev/null -w '%{http_code}' "$broker_url")
+        curl_status=$?
+        [[ $curl_status -eq 0 && $code == 204 ]] && return 0
+        echoerr "Broker $1 failed: HTTP $code, curl $curl_status (attempt $attempt/5)"
+        [[ $attempt -lt 5 ]] || return 1
+        case "$code" in
+            403|429|503) delay=$((15 + RANDOM % 6)) ;;
+            *)
+                [[ $curl_status -ne 0 || $code == 408 || $code == 5?? ]] || return 1
+                delay=$((2 ** attempt + RANDOM % 4))
+                ;;
+        esac
+        echo "Retrying broker $1 in $delay seconds"
+        sleep "$delay"
+    done
+}
+
+function broker_pull() {
+    local code
+    code=$(jq -nc --arg runs_on "$RUNS_ON" '{"runs-on": $runs_on}' |
+        curl -sS --connect-timeout 5 --max-time 100 -H "apikey: $REG_TOKEN_LAMBDA_APIKEY" \
+            -H 'Content-Type: application/json' --data-binary @- -o "$payload_file" -w '%{http_code}' "$broker_url")
+    if [[ $code != 200 ]]; then
+        echo "Broker pull: HTTP $code"
+        return 1
+    fi
+    [[ $(wc -c < "$payload_file") -le 262144 ]] || { echoerr 'Payload exceeds 256 KiB'; return 1; }
+    jq -e '.registration.token | type == "string" and length > 0' "$payload_file" >/dev/null || return 1
+    jq -c '{capacity_source_repository: .repository.full_name, capacity_source_job: .job.name, capacity_source_job_id: .job.id}' "$payload_file"
+    # Use a file so large base64 values never enter argv or the environment.
+    jq -Rs '{runner_payload_b64: (. | @base64)}' "$payload_file" > "$payload_varfile"
+}
+
+if [[ $broker_enabled == true ]]; then
+    echo "Using Lambda runner broker"
 elif [[ -n $GITHUB_TOKEN ]]; then
 	echo "Using PAT to get reg token"
 else
@@ -64,6 +122,12 @@ runnergroup="$RUNNERGROUP"
 EOF
 
 tf_args="-var-file $tfvarfile"
+if [[ $broker_enabled == true ]]; then
+    payload_file="$statedir/payload.json"
+    payload_varfile="$statedir/payload.tfvars.json"
+    [[ -f $payload_varfile ]] || printf '{"runner_payload_b64":""}' > "$payload_varfile"
+    tf_args="$tf_args -var-file $payload_varfile"
+fi
 
 if [[ $(arch) == "aarch64" ]]; then
 	tf_args="$tf_args -var arm64=true"
@@ -135,14 +199,8 @@ while true; do
 	token_start=$(date +%s)
 	token_expire=$((token_start + 1700))
 	token_method=""
-	if [[ -n "$REG_TOKEN_LAMBDA_URL" && -n "$REG_TOKEN_LAMBDA_APIKEY" ]]; then
-		reg_token_ret=$(curl \
-		  -s \
-		  $REG_TOKEN_LAMBDA_URL \
-		  -H "apikey: $REG_TOKEN_LAMBDA_APIKEY"
-		)
-
-		reg_token=$(echo "$reg_token_ret" | jq -r .join_token)
+	if [[ $broker_enabled == true ]]; then
+		reg_token=x
 		token_method="lambda"
 
 	elif [[ -n "$GITHUB_TOKEN" ]]; then
@@ -169,7 +227,7 @@ while true; do
 		exit 1
 	fi
 
-	echo "Reg token is obtained using $token_method: $reg_token"
+	echo "Reg token is obtained using $token_method"
 
         need_respawn=0
 	while [[ $(date +%s) -lt $token_expire ]]; do
@@ -213,6 +271,11 @@ while true; do
 		    # check drain flag
 		    checkdrain
 
+                    if [[ $broker_enabled == true ]] && ! broker_pull; then
+                        broker_backoff
+                        continue
+                    fi
+
                     echo "Reprovisioning the VM..."
                     terraform taint libvirt_volume.master || true
                     
@@ -227,7 +290,17 @@ while true; do
                         do_cleanup;
                         terraform apply -auto-approve $tf_args -var token=$reg_token
                     )
+                    apply_status=$?
                     set +x
+                    if [[ $broker_enabled == true ]]; then
+                        if [[ $apply_status -eq 0 ]]; then
+                            broker_action ack || broker_backoff
+                        else
+                            broker_action release || true
+                            broker_backoff
+                            continue
+                        fi
+                    fi
                     need_respawn=0
 
                     sleep 5

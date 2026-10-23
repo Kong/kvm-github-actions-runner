@@ -16,10 +16,25 @@ variable "runnergroup" {
 variable "url" {
   type        = string
   description = "url to register the runner with, like https://github.com/owner/repo or https://github.com/org"
+  default     = ""
 }
 
 variable "token" {
-  type = string
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "runner_payload_b64" {
+  description = "Base64-encoded complete broker response, passed through a protected tfvars file."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.runner_payload_b64 == "" || can(jsondecode(base64decode(var.runner_payload_b64)).registration.token)
+    error_message = "runner_payload_b64 must encode JSON containing a registration token."
+  }
 }
 
 variable "runner_version" {
@@ -33,8 +48,9 @@ variable "docker_user" {
 }
 
 variable "docker_pass" {
-  type    = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 
 variable "arm64" {
