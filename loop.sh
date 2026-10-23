@@ -47,8 +47,7 @@ function broker_action() {
     local code curl_status attempt delay
     for ((attempt=1; attempt<=5; attempt++)); do
         code=$(jq -c --arg action "$1" \
-            '{action: $action, "runs-on": .["runs-on"], receipt_handle: .lease.receipt_handle,
-              trace_id: (.trace_id // .delivery_id // .lease.message_id)}' "$payload_file" |
+            '{action: $action, "runs-on": .["runs-on"], receipt_handle: .lease.receipt_handle}' "$payload_file" |
             curl -sS --connect-timeout 5 --max-time 100 -H "apikey: $REG_TOKEN_LAMBDA_APIKEY" \
                 -H 'Content-Type: application/json' --data-binary @- -o /dev/null -w '%{http_code}' "$broker_url")
         curl_status=$?
@@ -78,7 +77,7 @@ function broker_pull() {
     fi
     [[ $(wc -c < "$payload_file") -le 262144 ]] || { echoerr 'Payload exceeds 256 KiB'; return 1; }
     jq -e '.registration.token | type == "string" and length > 0' "$payload_file" >/dev/null || return 1
-    jq -c '{repo: .repository.full_name, job: .job.name, job_id: .job.id, trace_id: .trace_id}' "$payload_file"
+    jq -c '{capacity_source_repository: .repository.full_name, capacity_source_job: .job.name, capacity_source_job_id: .job.id}' "$payload_file"
     # Use a file so large base64 values never enter argv or the environment.
     jq -Rs '{runner_payload_b64: (. | @base64)}' "$payload_file" > "$payload_varfile"
 }

@@ -17,18 +17,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TF = shutil.which("terraform") or str(Path.home() / ".cache/kvm-runner-tools/terraform")
 ISO_TOOLS = Path.home() / ".cache/kvm-runner-tools/genisoimage/usr/bin"
-TRACE_ID = "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+DELIVERY_ID = "72d3162e-cc78-11e3-81ab-4c9367dc0958"
 
 
 def payload():
     return {
         "schema_version": 2, "capacity_key": "456:300:100:1", "organization": "example-org", "installation_id": 456,
-        "trace_id": TRACE_ID, "delivery_id": TRACE_ID,
+        "delivery_id": DELIVERY_ID,
         "runs-on": "ubuntu-latest-kong", "repository": {"full_name": "example-org/repo"},
         "job": {"id": 100, "run_id": 200, "name": "build", "workflow_name": "CI"},
         "registration": {"scope": "organization", "url": "https://github.com/example-org",
                          "token": "secret-registration-token", "expires_at": "2099-01-01T00:00:00Z",
-                         "runner_name": f"capacity-100-{TRACE_ID[:18]}",
                          "labels": ["self-hosted", "Linux", "X64", "ubuntu-latest-kong"], "ephemeral": True},
         "lease": {"receipt_handle": "secret-receipt", "visibility_timeout_seconds": 900},
     }
@@ -178,7 +177,7 @@ def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, bro
     (bootstrap / "config.json").write_text(json.dumps({
         "payload": value, "settings": {"runner_group": runner_group, "runner_name": "test-host-worker-1"},
     }))
-    runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
+    runtime = rendered.split("set +x\n", 1)[1].split('\necho "Runner:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(bootstrap / "config.json"))
     config = tmp_path / "config.sh"
     config.write_text("#!/usr/bin/env python3\nimport json, pathlib, sys\n"
@@ -195,7 +194,7 @@ def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, bro
     assert ("--no-default-labels" in args) == broker_payload
     for flag, expected in (("--url", "https://github.com/example-org"),
                            ("--token", "secret-registration-token"),
-                           ("--name", f"test-host-worker-1-100-{TRACE_ID[:18]}" if broker_payload else "test-host-worker-1")):
+                           ("--name", "test-host-worker-1")):
         assert args[args.index(flag) + 1] == expected
     assert len(args[args.index("--name") + 1]) <= 64
     if runner_group:
@@ -206,19 +205,14 @@ def test_guest_registration_uses_host_name_and_group(tmp_path, runner_group, bro
     assert "--replace" in args
 
 
-@pytest.mark.parametrize("static_name", ["self-hosted-runner-2-worker-5", "host-" + "x" * 70 + "-worker-600"])
-@pytest.mark.parametrize("trace_source", ["trace_id", "delivery_id", "message_id"])
-def test_guest_runner_name_fits_limit_and_suffix_matches_full_trace_in_lambda_logs(
-        tmp_path, static_name, trace_source):
+@pytest.mark.parametrize("static_name", ["self-hosted-runner-2-worker-5", "self-hosted-runner-12-worker-16",
+                                        "host-" + "x" * 70 + "-worker-600"])
+def test_guest_runner_name_uses_static_host_slot_even_with_legacy_trace(tmp_path, static_name):
     value = payload()
     trace = "e57f1770-ceb5-11f1-9076-36058c072ea2"
     value["job"]["id"] = 120302862418
     value["trace_id"] = value["delivery_id"] = trace
     value["lease"]["message_id"] = trace
-    if trace_source != "trace_id":
-        value.pop("trace_id")
-    if trace_source == "message_id":
-        value.pop("delivery_id")
     # Old Lambda responses with a full GUID must also work during rollout.
     value["registration"]["runner_name"] = "capacity-120302862418-" + trace
     rendered = render(tmp_path, value)
@@ -227,43 +221,34 @@ def test_guest_runner_name_fits_limit_and_suffix_matches_full_trace_in_lambda_lo
     name_assignment = "RUNNER_NAME=" + rendered.split("RUNNER_NAME=", 1)[1].split("\nRUNNERGROUP=", 1)[0]
     script = 'payload_file=config.json\n' + name_assignment + '\nprintf "%s" "$RUNNER_NAME"\n'
     runner_name = bash(script, cwd=tmp_path).stdout
-    suffix = "120302862418-" + trace[:18]
-    assert runner_name == static_name[:63 - len(suffix)] + "-" + suffix
+    assert runner_name == static_name[:64]
     assert len(runner_name) <= 64
     assert not set(runner_name).intersection('\"/:<>\\|*?')
-    if len(static_name) + 1 + len(suffix) <= 64:
-        assert runner_name.startswith(static_name + "-")
-    if trace_source == "trace_id":
-        jq16 = Path.home() / ".cache/kvm-runner-tools/jq-1.6"
-        if jq16.is_file():
-            older = bash('jq() { "' + str(jq16) + '" "$@"; }\n' + script, cwd=tmp_path)
-            assert older.stdout == runner_name
+    assert "120302862418" not in runner_name and trace[:18] not in runner_name
 
 
-def test_monitoring_metadata_comes_from_payload_and_is_json_safe(tmp_path):
+def test_guest_logs_forward_actual_runner_output_without_source_job_metadata(tmp_path):
     value = payload()
     value["job"]["name"] = 'build "quoted"\nnext line'
     rendered = render(tmp_path, value, runner_group="Host Runners")
     (tmp_path / "config.json").write_text(json.dumps({
         "payload": value, "settings": {"runner_group": "Host Runners", "runner_name": "test-host-worker-1"},
     }))
-    runtime = rendered.split("set +x\n", 1)[1].split('\necho "Repository:', 1)[0]
+    runtime = rendered.split("set +x\n", 1)[1].split('\necho "Runner:', 1)[0]
     runtime = runtime.replace("/home/ubuntu/runner-config.json", str(tmp_path / "config.json"))
     runtime = runtime.replace('echo -n "$entry" > /dev/udp/$dd_host/10518', ":")
-    result = bash(runtime + "\nsend_logs job_started\n")
+    detail = '2026-10-23 08:42:00Z: Running job: actual build "quoted"'
+    result = bash(runtime + '\nsend_logs runner_log "$ACTUAL_LOG"\n', env={"ACTUAL_LOG": detail})
     entry = json.loads(result.stdout.removeprefix("Send logs ").removesuffix(" to 10.1.0.1\n"))
-    assert entry["repo"] == value["repository"]["full_name"]
-    assert entry["job"] == value["job"]["name"]
-    assert entry["job_id"] == "100"
+    assert entry["runner_log"] == detail
+    assert not {"repo", "job", "job_id", "workflow", "trace_id", "metadata_source"}.intersection(entry)
     assert entry["runner_group"] == "Host Runners"
-    assert entry["runner_name"] == f"test-host-worker-1-100-{TRACE_ID[:18]}"
-    assert entry["trace_id"] == TRACE_ID
-    assert entry["metadata_source"] == "capacity_request"
+    assert entry["runner_name"] == "test-host-worker-1"
     assert value["registration"]["token"] not in result.stdout
     assert value["lease"]["receipt_handle"] not in result.stdout
 
 
-def test_completion_hook_reads_payload_metadata_and_original_duration(tmp_path):
+def test_completion_hook_reads_actual_job_environment_and_original_duration(tmp_path):
     value = payload()
     value["job"]["name"] = 'build "quoted"\nnext|line,part'
     rendered = render(tmp_path, value, runner_group="Host Runners")
@@ -277,19 +262,19 @@ def test_completion_hook_reads_payload_metadata_and_original_duration(tmp_path):
     hook = hook.replace("/dev/udp/10.1.0.1/8125", str(tmp_path / "metric"))
     hook = hook.replace('echo -n "$metrics" >', 'printf "%s\\n" "$metrics" >>')
     bash("date() { echo 2000; }\n" + hook, env={
-        "GITHUB_REPOSITORY": "wrong/repo", "GITHUB_JOB": "wrong-job", "GITHUB_WORKFLOW": "wrong-workflow",
+        "GITHUB_REPOSITORY": "actual/repo", "GITHUB_JOB": "actual-build", "GITHUB_WORKFLOW": "Actual Workflow",
     })
     packets = (tmp_path / "metric").read_text().splitlines()
     assert len(packets) == 2
     assert packets[0].startswith("github.actions.jobs.repo:1|c|#")
     assert packets[1].startswith("github.actions.jobs.duration:1000|ms|@1|#")
     for packet in packets:
-        assert "repo:example-org/repo" in packet
-        assert 'job:build_"quoted"_next_line_part' in packet
-        assert "workflow:CI" in packet and "job_id:100" in packet
+        assert "repo:actual/repo" in packet
+        assert "job:actual-build" in packet
+        assert "workflow:Actual_Workflow" in packet
+        assert "job_id:" not in packet and "example-org/repo" not in packet and "build_" not in packet
         assert "runner_group:Host_Runners" in packet
         assert "arch:" in packet
-        assert "wrong" not in packet
 
 
 @pytest.mark.parametrize("state,shutdown", [
@@ -352,16 +337,18 @@ def test_ghasr97_provision_watchdog_preserves_listening_diagnostic(tmp_path, dia
 @pytest.mark.parametrize("exit_status", [0, 17])
 def test_foreground_runner_exit_status_is_preserved(tmp_path, exit_status):
     rendered = render(tmp_path, payload())
-    (tmp_path / "run.sh").write_text(f"#!/bin/bash\nexit {exit_status}\n")
+    (tmp_path / "run.sh").write_text(
+        f"#!/bin/bash\nprintf '%s\\n' '2026-10-23 08:42:00Z: Running job: actual build (1, 2, 3)'\nexit {exit_status}\n")
     (tmp_path / "run.sh").chmod(0o700)
     lifecycle = "export ACTIONS_RUNNER_HOOK_JOB_STARTED=" + rendered.split(
         "export ACTIONS_RUNNER_HOOK_JOB_STARTED=", 1)[1]
     result = bash('''
         send_metrics() { printf 'metric:%s\\n' "$*"; }
-        send_logs() { printf 'log:%s\\n' "$*"; }
+        send_logs() { printf 'log:%s %s\\n' "$1" "$2"; }
         sudo() { printf 'shutdown:%s\\n' "$*"; }
     ''' + lifecycle, cwd=tmp_path)
     assert f"log:runner_exit {exit_status}\n" in result.stdout
+    assert "log:runner_log 2026-10-23 08:42:00Z: Running job: actual build (1, 2, 3)\n" in result.stdout
     assert ("metric:jobs.completed" in result.stdout) == (exit_status == 0)
     assert "shutdown:poweroff" in result.stdout
 
@@ -402,7 +389,7 @@ def test_broker_action_retries_are_bounded_and_keep_the_same_receipt(
     assert result.returncode == (0 if succeeds else 1)
     requests = [json.loads(line) for line in (tmp_path / "requests").read_text().splitlines()]
     assert requests == [{"action": action, "runs-on": "ubuntu-latest-kong",
-                         "receipt_handle": "secret-receipt", "trace_id": TRACE_ID}] * attempts
+                         "receipt_handle": "secret-receipt"}] * attempts
     delay_file = tmp_path / "delays"
     delays = [int(line) for line in delay_file.read_text().splitlines()] if delay_file.exists() else []
     assert len(delays) == attempts - 1

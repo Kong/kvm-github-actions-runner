@@ -30,9 +30,10 @@ Keep this file accessible only to root. Start the existing
 
 `loop.sh` calls the broker directly from the existing Terraform loop when the
 broker credentials are configured. The PAT path remains available otherwise.
-It pulls only when the VM needs provisioning. An empty poll (`204`), a job-state
-conflict (`409`), or any error is logged and followed by a random 2-8 second
-retry delay. Conflict responses are not automatically acknowledged.
+It pulls only when the VM needs provisioning. An empty poll (`204`) or any error
+is logged and followed by a random 2-8 second retry delay. Each message represents
+one unit of runner capacity; a source job that is already running or completed
+does not cause a `409` response.
 
 The default `/pull` wait budget is 60 seconds. Lambda repeats SQS polls of at
 most 20 seconds and returns as soon as a message arrives; `204` means the total
@@ -56,19 +57,10 @@ protect those files as credentials.
 See the [NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html).
 
 The VM registers with `registration.url`, `registration.token`, the supplied
-runner labels, and `--ephemeral`. Broker runner names use the existing
-`<hostname>-<slot>` prefix followed by the broker's job ID and the first 18
-characters of `trace_id`, for example
-`self-hosted-runner-2-worker-1-120283397859-72d3162e-cc78-11e3`.
-The trace ID is the GitHub webhook's `X-GitHub-Delivery` GUID. The webhook
-response, queued/pulled payload, Lambda logs, host pull log, and guest logs
-carry the full value. Search the runner's trace suffix as a substring in
-CloudWatch Logs Insights to find the full ID and follow the capacity request.
-Cloud-init limits the complete runner name to 64 characters, shortening the
-static prefix only if necessary while keeping the job ID and trace suffix.
-It also accepts existing payloads with the previous full-GUID registration
-name. SQS redelivery keeps the same trace and runner suffix.
-The PAT path keeps its original static name. The runner group comes from the host's
+runner labels, and `--ephemeral`. Both broker and PAT paths use the existing
+static `<hostname>-<slot>` name, for example `self-hosted-runner-2-worker-1`,
+limited to GitHub's 64-character maximum. Capacity-source job IDs and webhook
+delivery IDs are not appended to runner names. The runner group comes from the host's
 `RUNNERGROUP` through Terraform's `runnergroup` variable; registration, metrics,
 and logs all use that host setting. Lambda does not configure a runner group.
 An empty `RUNNERGROUP` omits `--runnergroup`. Broker labels use
@@ -96,14 +88,16 @@ stays on the host. Configuration parsing and monitoring remain inside cloud-init
 
 The GHASR-92/95 registry cache configuration and the original GHASR-97 liveness,
 stall, and provisioning watchdogs remain in cloud-init. Their diagnostic-log
-checks and timeout conditions are unchanged. Monitoring reads repository/job/
-workflow metadata from the payload; runner output is no longer filtered for
-metadata. The existing completion hook reports job duration. `jobs.completed`
+checks and timeout conditions are unchanged. Runner output is filtered and
+forwarded to Datadog logs as before, including the actual `Running job:` name.
+The completion hook reads `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW`, and `GITHUB_JOB`
+from the actual job environment and reports job duration. `GITHUB_JOB` is the
+workflow job key; the runner output contains the display name, including matrix
+values. Capacity-source metadata is not submitted as actual job metadata. `jobs.completed`
 retains its original condition of a successful runner exit, and `runner_exit`
-records the runner's own exit status. Datadog records are marked
-`metadata_source: capacity_request`: GitHub can assign another matching queued
-job to this runner, so the payload identifies the source capacity request and
-does not bind the runner to an exact job.
+records the runner's own exit status using `PIPESTATUS[0]` across log forwarding.
+The broker payload identifies the source capacity request and does not bind the
+runner to an exact job. Custom trace fields have been removed.
 
 Run the broker application and host/guest integration tests on Linux with jq,
 Terraform, and the development Python dependencies:

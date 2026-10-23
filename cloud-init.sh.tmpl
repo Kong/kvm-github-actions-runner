@@ -78,22 +78,11 @@ runner_image_version=$(cat /imagegeneration/imagedata.json|jq .[1].detail|grep -
 
 set +x
 payload_file=/home/ubuntu/runner-config.json
-# Keep the job ID and searchable trace prefix within GitHub's 64-character limit.
-RUNNER_NAME=$(jq -r 'if .payload.schema_version == 2 then
-    ((.payload.job.id | tostring) + "-" +
-     ((.payload.trace_id // .payload.delivery_id // .payload.lease.message_id)[:18])) as $suffix |
-    .settings.runner_name[:(63 - ($suffix | length))] + "-" + $suffix
-    else .settings.runner_name end' "$payload_file")
+RUNNER_NAME=$(jq -r '.settings.runner_name[:64]' "$payload_file")
 RUNNERGROUP=$(jq -r '.settings.runner_group // ""' "$payload_file")
 RUNNER_URL=$(jq -r '.payload.registration.url' "$payload_file")
 RUNNER_LABELS=$(jq -r '.payload.registration.labels | join(",")' "$payload_file")
 REGISTRATION_TOKEN=$(jq -r '.payload.registration.token' "$payload_file")
-REPO=$(jq -r '.payload.repository.full_name // "unknown"' "$payload_file")
-JOB_ID=$(jq -r '.payload.job.id // "unknown"' "$payload_file")
-JOB_NAME=$(jq -r '.payload.job.name // "unknown"' "$payload_file")
-WORKFLOW=$(jq -r '.payload.job.workflow_name // "unknown"' "$payload_file")
-CAPACITY_KEY=$(jq -r '.payload.capacity_key // ""' "$payload_file")
-TRACE_ID=$(jq -r '.payload.trace_id // .payload.delivery_id // .payload.lease.message_id // ""' "$payload_file")
 DOCKER_USER=$(jq -r '.settings.docker_user // ""' "$payload_file")
 DOCKER_PASS=$(jq -r '.settings.docker_pass // ""' "$payload_file")
 RUNNER_VER=$(jq -r '.settings.runner_version' "$payload_file")
@@ -103,7 +92,6 @@ metric_tag() { printf '%s' "$1" | tr '|,: \r\n' '______'; }
 
 function send_metrics() {
 	metrics="github.actions.$1:$${2:-1}|$${3:-c}|#runner_group:$(metric_tag "$RUNNERGROUP"),#runner_image_version:$runner_image_version,#cloud_image_serial:$cloud_image_serial"
-	metrics="$metrics,repo:$(metric_tag "$REPO"),job:$(metric_tag "$JOB_NAME"),job_id:$(metric_tag "$JOB_ID"),workflow:$(metric_tag "$WORKFLOW")"
 	if [[ ! -z "$4" ]]; then metrics="$metrics,$4"; fi
 	echo "Send metrics $metrics to $dd_host"
 	echo -n "$metrics" > /dev/udp/$dd_host/8125
@@ -113,17 +101,13 @@ function send_logs() {
     local entry
     entry=$(jq -cn --arg event "$1" --arg detail "$${2:-}" \
         --arg runner "$RUNNER_NAME" --arg group "$RUNNERGROUP" \
-        --arg repo "$REPO" --arg job "$JOB_NAME" --arg job_id "$JOB_ID" \
-        --arg workflow "$WORKFLOW" --arg capacity "$CAPACITY_KEY" --arg trace_id "$TRACE_ID" \
         --arg image "$${runner_image_version:-unknown}" --arg serial "$${cloud_image_serial:-unknown}" \
         '{runner_name: $runner, runner_group: $group,
-          repo: $repo, job: $job, job_id: $job_id, workflow: $workflow,
-          runner_image_version: $image, cloud_image_serial: $serial,
-          capacity_key: $capacity, trace_id: $trace_id, metadata_source: "capacity_request"} + {($event): $detail}')
+          runner_image_version: $image, cloud_image_serial: $serial} + {($event): $detail}')
 	echo "Send logs $entry to $dd_host"
 	echo -n "$entry" > /dev/udp/$dd_host/10518
 }
-echo "Repository: $REPO, job: $JOB_NAME, job ID: $JOB_ID, trace ID: $TRACE_ID"
+echo "Runner: $RUNNER_NAME"
 
 send_metrics runners.started
 
@@ -250,8 +234,8 @@ if [[ $ARCH == "x86_64" ]]; then ARCH=x64
 else ARCH=arm64
 fi
 tags=$(jq -r '[["runner_group", .settings.runner_group],
-    ["repo", .payload.repository.full_name], ["workflow", .payload.job.workflow_name],
-    ["job", .payload.job.name], ["job_id", .payload.job.id]]
+    ["repo", env.GITHUB_REPOSITORY], ["workflow", env.GITHUB_WORKFLOW],
+    ["job", env.GITHUB_JOB]]
     | map(.[0] + ":" + ((.[1] // "unknown") | tostring | gsub("[|,\r\n ]"; "_"))) | join(",")' "$payload_file")
 function send_metrics() {
   metrics="github.actions.$1:$${2:-1}|$${3:-c}|#$tags,arch:$ARCH"
@@ -355,11 +339,16 @@ provision_watchdog &
 
 export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/ubuntu/actions-runner/start.sh
 export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
-./run.sh
+IFS=$'\r\n'
+./run.sh | grep --line-buffered -vE "^[ \t|/_\\()',\.\-]*$" | grep --line-buffered -vF 'Self-hosted runner registration' | while read -r line; do
+	echo "$line"
+	send_logs runner_log "$line"
+done
 # GHASR-97: capture run.sh's status before anything else runs. This used to read
-# $? after the IFS assignment, so it was always 0. With no output-filtering
-# pipeline, $? is the exit status of run.sh itself.
-status=$?
+# $? after the IFS assignment, so it was always 0. PIPESTATUS[0] preserves
+# run.sh's own status across the log-forwarding pipeline.
+status=$${PIPESTATUS[0]}
+IFS=$' \t\n'
 
 if [[ $status -eq 0 ]]; then send_metrics jobs.completed; fi
 send_logs runner_exit $status
