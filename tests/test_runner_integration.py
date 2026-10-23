@@ -51,8 +51,19 @@ def render(tmp_path, value):
     return base64.b64decode(json.loads(result.stdout)).decode()
 
 
-def test_large_payload_survives_tfvars_and_template_without_shell_evaluation(tmp_path):
+@pytest.mark.parametrize("runs_on", ["ubuntu-latest-kong", "ubuntu-latest-arm64-kong"])
+@pytest.mark.parametrize("jq_version", ["system", "1.6"])
+def test_large_payload_survives_tfvars_and_template_without_shell_evaluation(tmp_path, runs_on, jq_version):
+    env = {}
+    if jq_version == "1.6":
+        jq = Path.home() / ".cache/kvm-runner-tools/jq-1.6"
+        if not jq.is_file():
+            pytest.skip("Cached jq 1.6 is required for the minimum-version compatibility check")
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin/jq").symlink_to(jq)
+        env["PATH"] = str(tmp_path / "bin") + ":" + os.environ["PATH"]
     value = payload()
+    value["runs-on"] = runs_on
     value["job"]["name"] = "build ' $(touch SHOULD_NOT_EXIST) ${HOME}\nUnicode: \u6d4b\u8bd5"
     value["extension"] = "x" * 180_000
     source = tmp_path / "payload.json"
@@ -64,13 +75,18 @@ def test_large_payload_survives_tfvars_and_template_without_shell_evaluation(tmp
         echoerr() {{ echo "$*" >&2; }}
         payload_file='{source}'
         payload_varfile='{tfvars}'
-        RUNS_ON=ubuntu-latest-kong
+        RUNS_ON={runs_on}
         broker_url=https://example.invalid/pull
         REG_TOKEN_LAMBDA_APIKEY=test-key
-        curl() {{ cat > /dev/null; printf 200; }}
+        curl() {{
+            request=$(cat)
+            [[ $(printf '%s' "$request" | jq -r '.["runs-on"]') == "$RUNS_ON" ]] || return 1
+            printf 200
+        }}
         {function}
         broker_pull
-    """, cwd=tmp_path)
+    """, cwd=tmp_path, env=env)
+    assert result.stderr == ""
     transferred = base64.b64decode(json.loads(tfvars.read_text())["runner_payload_b64"])
     assert json.loads(transferred) == value
     rendered = render(tmp_path, json.loads(transferred))

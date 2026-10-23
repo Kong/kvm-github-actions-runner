@@ -68,7 +68,7 @@ function broker_action() {
 
 function broker_pull() {
     local code
-    code=$(jq -nc --arg label "$RUNS_ON" '{"runs-on": $label}' |
+    code=$(jq -nc --arg runs_on "$RUNS_ON" '{"runs-on": $runs_on}' |
         curl -sS --connect-timeout 5 --max-time 100 -H "apikey: $REG_TOKEN_LAMBDA_APIKEY" \
             -H 'Content-Type: application/json' --data-binary @- -o "$payload_file" -w '%{http_code}' "$broker_url")
     if [[ $code != 200 ]]; then
