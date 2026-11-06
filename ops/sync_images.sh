@@ -1,7 +1,7 @@
 #!/bin/bash
 total_runners=${1:-35}
-image_version=$(cat $(dirname $0)/../local.tf|grep image_version|grep -v previous|cut -d '"' -f2)
 image_arch=${2:-amd64}
+image_version=$(cat $(dirname $0)/../local.tf|grep "^  ${image_arch}_image_version"|cut -d '"' -f2)
 image_version=${3:-$image_version}
 rel=${4:-24}
 file_name=/root/ubuntu-${rel}.04-$image_version
