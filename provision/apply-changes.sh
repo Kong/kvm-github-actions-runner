@@ -7,5 +7,10 @@ if test -z "$ipv6_prefix"; then
     exit 1
 fi
 
+tf_args=""
+if [[ $(arch) == "aarch64" ]]; then
+    tf_args="-var arm64=true"
+fi
+
 terraform init
-terraform apply -var ipv6_prefix=${ipv6_prefix}
+terraform apply -var ipv6_prefix=${ipv6_prefix} $tf_args
