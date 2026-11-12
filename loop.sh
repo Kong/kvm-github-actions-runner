@@ -30,9 +30,13 @@ if [[ -n $REG_TOKEN_LAMBDA_URL && -n $REG_TOKEN_LAMBDA_APIKEY ]]; then
     broker_url=$REG_TOKEN_LAMBDA_URL
     broker_url=${broker_url%/}
     [[ $broker_url == */pull ]] || broker_url=$broker_url/pull
-    RUNS_ON=${RUNS_ON:-$(printf '%s' "$LABELS" | tr ',' '\n' | grep -Ex 'ubuntu-latest-kong|ubuntu-latest-arm64-kong')}
+    # Keep in sync with RUNNER_POOLS in the broker.
+    pools='ubuntu-latest-kong|ubuntu-latest-arm64-kong|ubuntu-latest-kong-fastrak|ubuntu-latest-sdet'
+    # grep exits 1 when the host carries none of them. Without || true, set -e
+    # kills the script here and the case below never reports what is wrong.
+    RUNS_ON=${RUNS_ON:-$(printf '%s' "$LABELS" | tr ',' '\n' | grep -Ex "$pools" || true)}
     case "$RUNS_ON" in
-        ubuntu-latest-kong|ubuntu-latest-arm64-kong) ;;
+        ubuntu-latest-kong|ubuntu-latest-arm64-kong|ubuntu-latest-kong-fastrak|ubuntu-latest-sdet) ;;
         *) echoerr 'Set RUNS_ON to exactly one supported label'; exit 1 ;;
     esac
 fi

@@ -519,3 +519,34 @@ elif tool == 'sleep':
     assert "secret-registration-token" not in logs
     assert "secret-receipt" not in logs
     assert "host-only-api-key" not in logs
+
+
+# Label sets taken from the hosts themselves, so a pool renamed in the broker
+# without a matching change here fails the build instead of a live host.
+@pytest.mark.parametrize("labels,runs_on", [
+    ("ubuntu-24.04-kong,ubuntu-latest-kong,ubuntu-latest-kong-finland", "ubuntu-latest-kong"),
+    ("ubuntu-24.04-arm64-kong,ubuntu-latest-arm64-kong", "ubuntu-latest-arm64-kong"),
+    ("ubuntu-latest-kong-fastrak,ubuntu-latest-kong-germany-fastrak,ubuntu-24.04-kong-fastrak",
+     "ubuntu-latest-kong-fastrak"),
+    ("ubuntu-24.04-sdet,ubuntu-latest-sdet,ubuntu-latest-sdet-finland", "ubuntu-latest-sdet"),
+    ("ubuntu-24.04-kong-legacy", None),
+])
+def test_runs_on_is_derived_from_host_labels_and_reports_unsupported_pools(labels, runs_on):
+    source = (ROOT / "loop.sh").read_text()
+    block = "broker_enabled=false" + source.split("broker_enabled=false", 1)[1].split("\nfi\n", 1)[0] + "\nfi"
+    result = bash(f"""
+        set -e
+        echoerr() {{ printf 'ERROR %s\\n' "$*" >&2; }}
+        REG_TOKEN_LAMBDA_URL=https://example.invalid
+        REG_TOKEN_LAMBDA_APIKEY=test-key
+        LABELS='{labels}'
+        {block}
+        printf '%s' "$RUNS_ON"
+    """, check=False)
+    if runs_on is None:
+        # Without the explicit message the host only sees set -e exit 1.
+        assert result.returncode == 1
+        assert "Set RUNS_ON to exactly one supported label" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == runs_on
