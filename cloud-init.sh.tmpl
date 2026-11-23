@@ -339,10 +339,23 @@ provision_watchdog &
 
 export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/ubuntu/actions-runner/start.sh
 export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
+idle_watchdog_started=false
 IFS=$'\r\n'
 ./run.sh | grep --line-buffered -vE "^[ \t|/_\\()',\.\-]*$" | grep --line-buffered -vF 'Self-hosted runner registration' | while read -r line; do
 	echo "$line"
 	send_logs runner_log "$line"
+	# Recycle a runner that has not started its first job after five minutes online.
+	if [[ $idle_watchdog_started == false && "$line" == *"Listening for Jobs"* ]]; then
+		idle_watchdog_started=true
+		(
+			sleep 300
+			if [[ ! -f /tmp/job_start.ts ]] && ! pgrep -f '[R]unner\.Worker' >/dev/null; then
+				send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:idle_timeout"
+				send_logs runner_log 'No job started within 300 seconds of listening, powering off for reassignment'
+				sudo poweroff
+			fi
+		) &
+	fi
 done
 # GHASR-97: capture run.sh's status before anything else runs. This used to read
 # $? after the IFS assignment, so it was always 0. PIPESTATUS[0] preserves
