@@ -72,6 +72,20 @@ resource "libvirt_network" "kong" {
     }
   }
 
+  # GHASR-105: all 10-20 VMs resolve through this one dnsmasq, and the stock caps
+  # (cache 150, 150 concurrent) were being hit, dropping queries. Jobs saw it as a
+  # random "Unknown host" on whatever domain lost the race.
+  dnsmasq_options {
+    options {
+      option_name  = "cache-size"
+      option_value = "10000"
+    }
+    options {
+      option_name  = "dns-forward-max"
+      option_value = "1000"
+    }
+  }
+
   addresses = ["10.1.0.0/24", "${var.ipv6_prefix}:1001::/96"]
 
   autostart = true
