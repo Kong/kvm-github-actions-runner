@@ -399,24 +399,33 @@ def test_ghasr107_idle_recycle_aborts_when_github_already_handed_over_a_job(tmp_
 @pytest.mark.parametrize("worker_appears,shutdown", [(True, False), (False, True)])
 def test_ghasr107_claimed_job_without_a_worker_cannot_park_the_vm_forever(tmp_path, worker_appears, shutdown):
     script = idle_watchdog_script(tmp_path)
-    # The worker shows up on the third poll, or never shows up at all.
-    pgrep = "polls=$((polls + 1)); [[ $polls -ge 3 ]]" if worker_appears else "return 1"
+    # GetJobMessageAsync retries 5 times over a 100s HTTP timeout with a 5-15s
+    # backoff, so a working runner can legitimately take 560s to reach the
+    # worker. Have it appear at 580s, past that ceiling, and it must survive.
+    pgrep = "[[ $tick -ge 1580 ]]" if worker_appears else "return 1"
 
     result = bash(f'''
         tick=1000
-        polls=0
         date() {{ echo "$tick"; }}
-        sleep() {{ tick=$((tick + $1)); (( tick <= 2000 )) || exit 77; }}
+        sleep() {{ tick=$((tick + $1)); (( tick <= 4000 )) || exit 77; }}
         send_metrics() {{ printf '%s\\n' "$*"; }}
         send_logs() {{ printf '%s\\n' "$*"; }}
         sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
         pgrep() {{ {pgrep}; }}
         RUNNER_NAME=test-runner
-    ''' + script + "\nawait_worker_or_recycle\n", check=False)
+    ''' + script + '\nawait_worker_or_recycle\nprintf "endtick:%s\\n" "$tick"\n', check=False)
 
     assert ("shutdown:poweroff" in result.stdout) == shutdown
     assert ("claim_without_worker" in result.stdout) == shutdown
     assert result.returncode == 0
+
+    endtick = int(result.stdout.split("endtick:", 1)[1].split()[0])
+    if shutdown:
+        # Never give up before the retry ceiling a healthy runner can hit.
+        assert endtick - 1000 >= 560
+    else:
+        # A worker that turns up at 580s must not have been killed first.
+        assert endtick - 1000 >= 580
 
 
 @pytest.mark.parametrize("exit_status", [0, 17])

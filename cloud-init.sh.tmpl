@@ -350,15 +350,21 @@ function job_in_flight() {
 # GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
 # that handoff so a claim that never produces a worker cannot park the VM here
 # forever waiting for something that is not coming.
+#
+# The deadline has to clear a healthy retry storm, or it kills a job that was
+# still coming. GetJobMessageAsync is wrapped in RetryRequest with maxAttempts=5
+# and a 5-15s backoff, over an HTTP layer whose SendTimeout is 100s, so the
+# worst case a working runner can legitimately spend here is 5*100 + 4*15 = 560s.
 function await_worker_or_recycle() {
-	local deadline=$(( $(date +%s) + 300 ))
+	local limit=900
+	local deadline=$(( $(date +%s) + limit ))
 	while [[ $(date +%s) -lt $deadline ]]; do
 		pgrep -f '[R]unner\.Worker' >/dev/null && return
 		sleep 10
 	done
 
 	send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:claim_without_worker"
-	send_logs runner_log 'Job claimed but no worker started within 300 seconds, powering off for rebuild'
+	send_logs runner_log "Job claimed but no worker started within $limit seconds, powering off for rebuild"
 	sleep 2 # let the UDP metric leave before the interface goes down
 	sudo poweroff
 }
