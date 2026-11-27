@@ -347,22 +347,6 @@ function job_in_flight() {
 		/home/ubuntu/actions-runner/_diag/Runner_*.log
 }
 
-# GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
-# that handoff so a claim that never produces a worker cannot park the VM here
-# forever waiting for something that is not coming.
-function await_worker_or_recycle() {
-	local deadline=$(( $(date +%s) + 300 ))
-	while [[ $(date +%s) -lt $deadline ]]; do
-		pgrep -f '[R]unner\.Worker' >/dev/null && return
-		sleep 10
-	done
-
-	send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:claim_without_worker"
-	send_logs runner_log 'Job claimed but no worker started within 300 seconds, powering off for rebuild'
-	sleep 2 # let the UDP metric leave before the interface goes down
-	sudo poweroff
-}
-
 # GHASR-107: a warm spare stays dispatchable until the instant it powers off, so
 # confirm it is still idle over a window rather than once, and jitter the
 # deadline so spares booted together do not expire into one burst of work.
@@ -370,11 +354,14 @@ function idle_watchdog() {
 	local waited=$((300 + RANDOM % 120))
 	sleep $waited
 
+	# Stand down for good once a job is claimed: the runner is ephemeral, so it
+	# takes exactly one job and powers the VM off when it finishes. A claim that
+	# never produces a worker is runner_watchdog's job, and it discriminates
+	# retrying from wedged by log staleness, which a flat timer here cannot.
 	for _ in 1 2 3; do
 		if job_in_flight; then
 			send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:idle_timeout_aborted"
 			send_logs runner_log 'Job claimed while the idle timer fired, cancelling recycle'
-			await_worker_or_recycle
 			return
 		fi
 		sleep 5

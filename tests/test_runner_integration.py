@@ -382,40 +382,44 @@ def test_ghasr107_idle_recycle_aborts_when_github_already_handed_over_a_job(tmp_
         pgrep() {{ return {0 if state == "worker_running" else 1}; }}
         RUNNER_NAME=test-runner
     ''' + script + '''
-        await_worker_or_recycle() { printf 'handoff\\n'; }
         idle_watchdog
         printf "waits:%s\\n" "$waits"
     ''')
 
     assert ("shutdown:poweroff" in result.stdout) == shutdown
     assert ("idle_timeout_aborted" in result.stdout) == (not shutdown)
-    assert ("handoff" in result.stdout) == (not shutdown)
 
     # The deadline is jittered so spares booted together do not expire in lockstep.
     deadline = int(result.stdout.split("waits:", 1)[1].split()[0])
     assert 300 <= deadline < 420
 
 
-@pytest.mark.parametrize("worker_appears,shutdown", [(True, False), (False, True)])
-def test_ghasr107_claimed_job_without_a_worker_cannot_park_the_vm_forever(tmp_path, worker_appears, shutdown):
+def test_ghasr107_a_claimed_job_is_never_powered_off_by_the_idle_watchdog(tmp_path):
+    """Once a job is claimed the watchdog must exit, leaving the VM to the job
+    itself and, if it wedges, to runner_watchdog. Killing it here would lose a
+    job that GitHub has already handed over."""
+    diag = tmp_path / "diag"
+    diag.mkdir()
     script = idle_watchdog_script(tmp_path)
-    # The worker shows up on the third poll, or never shows up at all.
-    pgrep = "polls=$((polls + 1)); [[ $polls -ge 3 ]]" if worker_appears else "return 1"
+    script = script.replace("/home/ubuntu/actions-runner/_diag", str(diag))
+    script = script.replace("/tmp/job_start.ts", str(tmp_path / "started"))
+    (diag / "Runner_test.log").write_text(f"Listening for Jobs\n{CLAIM}\n")
 
-    result = bash(f'''
+    # No worker ever appears and time runs on indefinitely; still no poweroff.
+    result = bash('''
         tick=1000
-        polls=0
-        date() {{ echo "$tick"; }}
-        sleep() {{ tick=$((tick + $1)); (( tick <= 2000 )) || exit 77; }}
-        send_metrics() {{ printf '%s\\n' "$*"; }}
-        send_logs() {{ printf '%s\\n' "$*"; }}
-        sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
-        pgrep() {{ {pgrep}; }}
+        date() { echo "$tick"; }
+        sleep() { tick=$((tick + $1)); (( tick <= 100000 )) || exit 77; }
+        send_metrics() { printf '%s\\n' "$*"; }
+        send_logs() { printf '%s\\n' "$*"; }
+        sudo() { printf 'shutdown:%s\\n' "$*"; }
+        pgrep() { return 1; }
         RUNNER_NAME=test-runner
-    ''' + script + "\nawait_worker_or_recycle\n", check=False)
+    ''' + script + "\nidle_watchdog\necho returned\n", check=False)
 
-    assert ("shutdown:poweroff" in result.stdout) == shutdown
-    assert ("claim_without_worker" in result.stdout) == shutdown
+    assert "shutdown:poweroff" not in result.stdout
+    assert "idle_timeout_aborted" in result.stdout
+    assert "returned" in result.stdout
     assert result.returncode == 0
 
 
