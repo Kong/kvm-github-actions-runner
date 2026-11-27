@@ -78,7 +78,8 @@ def test_large_payload_survives_tfvars_and_template_without_shell_evaluation(tmp
         payload_file='{source}'
         payload_varfile='{tfvars}'
         RUNS_ON={runs_on}
-        broker_url=https://example.invalid/pull
+        runs_on_pools=({runs_on})
+        broker_url=https://example.invalid/pull/v2
         REG_TOKEN_LAMBDA_APIKEY=test-key
         curl() {{
             request=$(cat)
@@ -564,7 +565,7 @@ if tool == 'curl':
     body = json.loads(sys.stdin.read() if source == '@-' else pathlib.Path(source[1:]).read_text())
     response = pathlib.Path(args[args.index('-o') + 1])
     action = body.get('action', 'pull')
-    record({'tool': tool, 'action': action, 'runs-on': body.get('runs-on')})
+    record({'tool': tool, 'action': action, 'runs-on': body.get('runs-on'), 'url': args[-1]})
     if action != 'pull':
         assert body['receipt_handle'] == 'secret-receipt'
         if action == 'ack':
@@ -636,7 +637,13 @@ elif tool == 'sleep':
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=5)
     lines = [json.loads(line) for line in events.read_text().splitlines()]
-    actions = [line["action"] for line in lines if line["tool"] == "curl"]
+    calls = [line for line in lines if line["tool"] == "curl"]
+    actions = [line["action"] for line in calls]
+    # The whole script, not an extracted block: pulls and handoffs both go to the
+    # new path, derived from the Function URL base the host has configured today.
+    assert {line["url"] for line in calls} == {"https://example.invalid/pull/v2"}
+    # A single-pool host keeps sending the bare string it sent before.
+    assert {line["runs-on"] for line in calls} == {"ubuntu-latest-kong"}
     assert actions[:5] == ["pull", "pull", "pull", "pull", "ack" if apply_success else "release"]
     assert "extend" not in actions
     assert actions.count("ack" if apply_success else "release") == (5 if action_failure else 1)
@@ -654,6 +661,26 @@ elif tool == 'sleep':
     assert "host-only-api-key" not in logs
 
 
+def startup_block():
+    """The broker configuration block, run on its own with nothing else sourced."""
+    source = (ROOT / "loop.sh").read_text()
+    return "broker_enabled=false" + source.split("broker_enabled=false", 1)[1].split("\nfi\n", 1)[0] + "\nfi"
+
+
+def configure(url="https://example.invalid", runs_on=None, labels=""):
+    assignment = f"RUNS_ON='{runs_on}'" if runs_on is not None else "unset RUNS_ON"
+    return bash(f"""
+        set -e
+        echoerr() {{ printf 'ERROR %s\\n' "$*" >&2; }}
+        REG_TOKEN_LAMBDA_URL='{url}'
+        REG_TOKEN_LAMBDA_APIKEY=test-key
+        LABELS='{labels}'
+        {assignment}
+        {startup_block()}
+        printf '%s|%s|%s' "$broker_url" "${{#runs_on_pools[@]}}" "$(IFS=,; printf '%s' "${{runs_on_pools[*]}}")"
+    """, check=False)
+
+
 # Label sets taken from the hosts themselves, so a pool renamed in the broker
 # without a matching change here fails the build instead of a live host.
 @pytest.mark.parametrize("labels,runs_on", [
@@ -662,24 +689,95 @@ elif tool == 'sleep':
     ("ubuntu-latest-kong-fastrak,ubuntu-latest-kong-germany-fastrak,ubuntu-24.04-kong-fastrak",
      "ubuntu-latest-kong-fastrak"),
     ("ubuntu-24.04-sdet,ubuntu-latest-sdet,ubuntu-latest-sdet-finland", "ubuntu-latest-sdet"),
+    ("ubuntu-24.04-kong-release,ubuntu-latest-kong-release", "ubuntu-latest-kong-release"),
+    ("ubuntu-24.04-arm64-kong-release,ubuntu-latest-arm64-kong-release",
+     "ubuntu-latest-arm64-kong-release"),
     ("ubuntu-24.04-kong-legacy", None),
 ])
 def test_runs_on_is_derived_from_host_labels_and_reports_unsupported_pools(labels, runs_on):
-    source = (ROOT / "loop.sh").read_text()
-    block = "broker_enabled=false" + source.split("broker_enabled=false", 1)[1].split("\nfi\n", 1)[0] + "\nfi"
-    result = bash(f"""
-        set -e
-        echoerr() {{ printf 'ERROR %s\\n' "$*" >&2; }}
-        REG_TOKEN_LAMBDA_URL=https://example.invalid
-        REG_TOKEN_LAMBDA_APIKEY=test-key
-        LABELS='{labels}'
-        {block}
-        printf '%s' "$RUNS_ON"
-    """, check=False)
+    result = configure(labels=labels)
     if runs_on is None:
         # Without the explicit message the host only sees set -e exit 1.
         assert result.returncode == 1
-        assert "Set RUNS_ON to exactly one supported label" in result.stderr
+        assert "Set RUNS_ON to 1-4 comma-separated supported labels" in result.stderr
     else:
         assert result.returncode == 0, result.stderr
-        assert result.stdout == runs_on
+        assert result.stdout.split("|")[1:] == ["1", runs_on]
+
+
+def test_two_matching_labels_are_refused_instead_of_silently_producing_two_lines():
+    # grep -Ex matched both, RUNS_ON became a two-line value, and that value
+    # matched no pool: the host died on the check instead of on this message.
+    # Which pool comes first is a priority decision LABELS cannot express.
+    result = configure(labels="ubuntu-latest-kong-release,ubuntu-latest-kong")
+    assert result.returncode == 1
+    assert "LABELS matches more than one pool" in result.stderr
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.invalid",
+    "https://example.invalid/",
+    "https://example.invalid/pull",
+    "https://example.invalid/pull/v2",
+])
+def test_every_configured_url_form_is_derived_to_pull_v2(url):
+    # No test covered this derivation while it still pointed at /pull, and it is
+    # the single line that decides whether a host talks to the new endpoint.
+    result = configure(url=url, runs_on="ubuntu-latest-kong")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("|")[0] == "https://example.invalid/pull/v2"
+
+
+@pytest.mark.parametrize("runs_on,pools", [
+    ("ubuntu-latest-kong", ["ubuntu-latest-kong"]),
+    ("ubuntu-latest-kong-release,ubuntu-latest-kong",
+     ["ubuntu-latest-kong-release", "ubuntu-latest-kong"]),
+    ("ubuntu-latest-arm64-kong-release,ubuntu-latest-arm64-kong",
+     ["ubuntu-latest-arm64-kong-release", "ubuntu-latest-arm64-kong"]),
+    ("ubuntu-latest-kong,ubuntu-latest-sdet,ubuntu-latest-kong-fastrak,ubuntu-latest-kong-release",
+     ["ubuntu-latest-kong", "ubuntu-latest-sdet", "ubuntu-latest-kong-fastrak",
+      "ubuntu-latest-kong-release"]),
+    # An explicit RUNS_ON overrides labels that would infer something else.
+    ("ubuntu-latest-sdet", ["ubuntu-latest-sdet"]),
+    ("ubuntu-latest-kong-release,bogus-pool", None),
+    ("ubuntu-latest-kong,,ubuntu-latest-sdet", None),
+    ("ubuntu-latest-kong ubuntu-latest-sdet", None),
+    ("ubuntu-latest-kong,ubuntu-latest-sdet,ubuntu-latest-kong-fastrak,"
+     "ubuntu-latest-kong-release,ubuntu-latest-arm64-kong", None),
+])
+def test_runs_on_takes_an_ordered_list_and_refuses_anything_the_broker_would(runs_on, pools):
+    result = configure(runs_on=runs_on, labels="ubuntu-latest-kong")
+    if pools is None:
+        assert result.returncode == 1
+        assert result.stderr.startswith("ERROR ")
+    else:
+        assert result.returncode == 0, result.stderr
+        # Order is the priority order the broker polls in, so it is asserted.
+        assert result.stdout.split("|")[1:] == [str(len(pools)), ",".join(pools)]
+
+
+@pytest.mark.parametrize("runs_on,body", [
+    ("ubuntu-latest-kong", "ubuntu-latest-kong"),
+    ("ubuntu-latest-kong-release,ubuntu-latest-kong",
+     ["ubuntu-latest-kong-release", "ubuntu-latest-kong"]),
+])
+def test_broker_pull_sends_a_string_for_one_pool_and_an_ordered_array_for_several(tmp_path, runs_on, body):
+    # The single-pool body has to stay byte-identical to what /pull received, so
+    # moving a host to the new path is a path change and nothing else.
+    source = (ROOT / "loop.sh").read_text()
+    function = source.split("function broker_pull() {", 1)[1].split("\n}\n", 1)[0]
+    (tmp_path / "payload.json").write_text(json.dumps(payload()))
+    result = bash(f"""
+        echoerr() {{ echo "$*" >&2; }}
+        payload_file='{tmp_path / "payload.json"}'
+        payload_varfile='{tmp_path / "out.tfvars.json"}'
+        IFS=',' read -ra runs_on_pools <<< '{runs_on}'
+        broker_url=https://example.invalid/pull/v2
+        REG_TOKEN_LAMBDA_APIKEY=test-key
+        curl() {{ cat > '{tmp_path / "request.json"}'; printf 200; }}
+        function broker_pull() {{{function}
+        }}
+        broker_pull
+    """, cwd=tmp_path, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "request.json").read_text()) == {"runs-on": body}

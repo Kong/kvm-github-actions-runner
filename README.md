@@ -14,7 +14,7 @@ Configure `/root/self-hosted-kvm.env` with the existing broker URL and pull key:
 ```shell
 REG_TOKEN_LAMBDA_URL='https://your-function.lambda-url.eu-central-1.on.aws'
 REG_TOKEN_LAMBDA_APIKEY='<existing-pull-api-key>'
-RUNS_ON='ubuntu-latest-kong'
+RUNS_ON='ubuntu-latest-kong-release,ubuntu-latest-kong'
 RUNNERGROUP='<existing-runner-group>'
 DOCKER_USER='<docker-user>'
 DOCKER_PASS='<docker-password>'
@@ -22,9 +22,23 @@ CPU=2
 MEMORY=7168
 ```
 
-Use `ubuntu-latest-arm64-kong` on ARM64 hosts. `RUNS_ON` selects exactly one
-queue; when omitted, one supported target can be inferred from the existing
-comma-separated `LABELS`. The URL may be the Function URL base or end in `/pull`.
+Use the `arm64` pool names on ARM64 hosts; all the pools named in `RUNS_ON` must
+share one architecture, because the slot can only serve the one it is.
+
+`RUNS_ON` is an ordered list of 1 to 4 queues, and **the order is the priority**:
+the broker polls them in that order and returns the first message it finds, so
+`ubuntu-latest-kong-release,ubuntu-latest-kong` serves the release pool first and
+falls back to the main one rather than idling. A single name is still valid and
+behaves exactly as before. When `RUNS_ON` is omitted, one — and only one —
+supported target is inferred from the existing comma-separated `LABELS`; a host
+whose labels match two pools has to set `RUNS_ON`, since labels cannot say which
+pool comes first.
+
+The URL may be the Function URL base or end in `/pull` or `/pull/v2`; this script
+sends every request to `/pull/v2`, which is the endpoint that accepts the list.
+Hosts still running the previous script keep using `/pull`, which is unchanged,
+so the two can run side by side during a rollout.
+
 Keep this file accessible only to root. Start the existing
 `self-hosted-kvm@worker-*` services as described below.
 
@@ -35,9 +49,12 @@ is logged and followed by a random 2-8 second retry delay. Each message represen
 one unit of runner capacity; a source job that is already running or completed
 does not cause a `409` response.
 
-The default `/pull` wait budget is 60 seconds. Lambda repeats SQS polls of at
+The default wait budget is 60 seconds. Lambda repeats SQS polls of at
 most 20 seconds and returns as soon as a message arrives; `204` means the total
-wait expired without a message. Lambda has a 90-second timeout and the host uses
+wait expired without a message. With several pools the budget is spent in
+rounds: every pool but the last gets a short slice (`PRIORITY_POLL_SECONDS`,
+2 seconds by default) so a message in a higher-priority queue is found within
+one round, and the last pool absorbs the rest of each round. Lambda has a 90-second timeout and the host uses
 a 100-second HTTP timeout. To change the budget, set `pull_wait_seconds` in the
 Lambda Terraform stack, and set host `BROKER_HTTP_TIMEOUT` above the resulting
 Lambda timeout. Each blocked request occupies Lambda concurrency; size

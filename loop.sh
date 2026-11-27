@@ -29,16 +29,43 @@ if [[ -n $REG_TOKEN_LAMBDA_URL && -n $REG_TOKEN_LAMBDA_APIKEY ]]; then
     broker_enabled=true
     broker_url=$REG_TOKEN_LAMBDA_URL
     broker_url=${broker_url%/}
-    [[ $broker_url == */pull ]] || broker_url=$broker_url/pull
-    # Keep in sync with RUNNER_POOLS in the broker.
-    pools='ubuntu-latest-kong|ubuntu-latest-arm64-kong|ubuntu-latest-kong-fastrak|ubuntu-latest-sdet'
-    # grep exits 1 when the host carries none of them. Without || true, set -e
-    # kills the script here and the case below never reports what is wrong.
-    RUNS_ON=${RUNS_ON:-$(printf '%s' "$LABELS" | tr ',' '\n' | grep -Ex "$pools" || true)}
-    case "$RUNS_ON" in
-        ubuntu-latest-kong|ubuntu-latest-arm64-kong|ubuntu-latest-kong-fastrak|ubuntu-latest-sdet) ;;
-        *) echoerr 'Set RUNS_ON to exactly one supported label'; exit 1 ;;
+    # This script always asks for an ordered pool list, so it always talks to
+    # /pull/v2. /pull is left exactly as it is for the hosts still running the
+    # previous script: which endpoint a host uses follows from which script it
+    # has, and from nothing else.
+    case $broker_url in
+        */pull/v2) ;;
+        */pull) broker_url=$broker_url/v2 ;;
+        *) broker_url=$broker_url/pull/v2 ;;
     esac
+    # Keep in sync with RUNNER_POOLS in the broker.
+    pools='ubuntu-latest-kong|ubuntu-latest-arm64-kong|ubuntu-latest-kong-fastrak|ubuntu-latest-sdet|ubuntu-latest-kong-release|ubuntu-latest-arm64-kong-release'
+    if [[ -z $RUNS_ON ]]; then
+        # grep exits 1 when the host carries none of them. Without || true, set -e
+        # kills the script here and the check below never reports what is wrong.
+        RUNS_ON=$(printf '%s' "$LABELS" | tr ',' '\n' | grep -Ex "$pools" || true)
+        # Inference stays single-pool. Two matching labels used to leave RUNS_ON
+        # holding two lines, which then matched no pool at all; and a host that
+        # serves two pools has to state the order they are polled in, which
+        # LABELS cannot express.
+        [[ $(printf '%s' "$RUNS_ON" | grep -c . || true) -le 1 ]] || {
+            echoerr 'LABELS matches more than one pool; set RUNS_ON explicitly'; exit 1
+        }
+    fi
+    # An ordered list: the broker polls these queues in this order and the first
+    # message wins. It rejects more than four, so say so here rather than after
+    # a round trip.
+    IFS=',' read -ra runs_on_pools <<< "$RUNS_ON"
+    (( ${#runs_on_pools[@]} >= 1 && ${#runs_on_pools[@]} <= 4 )) || {
+        echoerr 'Set RUNS_ON to 1-4 comma-separated supported labels'; exit 1
+    }
+    # Checked against the same list that derives it, so a new pool is added in
+    # one place only.
+    for runs_on_pool in "${runs_on_pools[@]}"; do
+        printf '%s' "$runs_on_pool" | grep -Exq "$pools" || {
+            echoerr "Unsupported pool in RUNS_ON: $runs_on_pool"; exit 1
+        }
+    done
 fi
 
 function broker_backoff() {
@@ -72,7 +99,14 @@ function broker_action() {
 
 function broker_pull() {
     local code
-    code=$(jq -nc --arg runs_on "$RUNS_ON" '{"runs-on": $runs_on}' |
+    # Sent from the array the checks above ran on, not from a second split of
+    # RUNS_ON: a split that disagreed with the validating one would send the
+    # broker something no check here ever looked at. One pool is sent as the same
+    # plain string the previous script sent, so a single-pool host's request body
+    # is unchanged; several are sent as an ordered array.
+    code=$(jq -nc --args \
+        '{"runs-on": (if ($ARGS.positional | length) == 1 then $ARGS.positional[0] else $ARGS.positional end)}' \
+        "${runs_on_pools[@]}" |
         curl -sS --connect-timeout 5 --max-time 100 -H "apikey: $REG_TOKEN_LAMBDA_APIKEY" \
             -H 'Content-Type: application/json' --data-binary @- -o "$payload_file" -w '%{http_code}' "$broker_url")
     if [[ $code != 200 ]]; then
