@@ -347,6 +347,14 @@ function job_in_flight() {
 		/home/ubuntu/actions-runner/_diag/Runner_*.log
 }
 
+# GHASR-107: job_in_flight only ever says "a job was claimed at some point",
+# because the log line it reads is never removed. Count the claims instead, so a
+# fresh one can be told apart from the one we are already waiting on.
+function claim_count() {
+	grep -hoE "Acknowledging runner request|Job request [0-9]+ for plan " \
+		/home/ubuntu/actions-runner/_diag/Runner_*.log 2>/dev/null | wc -l
+}
+
 # GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
 # that handoff so a claim that never produces a worker cannot park the VM here
 # forever waiting for something that is not coming.
@@ -355,11 +363,23 @@ function job_in_flight() {
 # still coming. GetJobMessageAsync is wrapped in RetryRequest with maxAttempts=5
 # and a 5-15s backoff, over an HTTP layer whose SendTimeout is 100s, so the
 # worst case a working runner can legitimately spend here is 5*100 + 4*15 = 560s.
+#
+# A 404/409/422 on that fetch sends the listener back to listening, so the claim
+# can evaporate and the runner go on serving. Restart the wait on a fresh claim
+# rather than powering off underneath it, and re-check right before giving up.
 function await_worker_or_recycle() {
-	local limit=900
-	local deadline=$(( $(date +%s) + limit ))
-	while [[ $(date +%s) -lt $deadline ]]; do
+	local limit=900 seen deadline now
+	seen=$(claim_count)
+	deadline=$(( $(date +%s) + limit ))
+
+	while true; do
 		pgrep -f '[R]unner\.Worker' >/dev/null && return
+		now=$(claim_count)
+		if [[ $now -gt $seen ]]; then
+			seen=$now
+			deadline=$(( $(date +%s) + limit ))
+		fi
+		[[ $(date +%s) -ge $deadline ]] && break
 		sleep 10
 	done
 
