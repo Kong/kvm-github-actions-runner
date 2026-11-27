@@ -334,6 +334,91 @@ def test_ghasr97_provision_watchdog_preserves_listening_diagnostic(tmp_path, dia
     assert ("never_listening" in result.stdout) == shutdown
 
 
+CLAIM = "Job request 42 for plan 7f3 job 9c1 received."
+
+
+def idle_watchdog_script(tmp_path):
+    rendered = render(tmp_path, payload())
+    body = rendered.split("function job_in_flight() {", 1)[1].split(
+        "\nexport ACTIONS_RUNNER_HOOK_JOB_STARTED", 1)[0]
+    return "function job_in_flight() {" + body
+
+
+@pytest.mark.parametrize("state,shutdown", [
+    ("idle", True),
+    ("job_hook_ran", False),
+    ("worker_running", False),
+    ("job_request_received", False),
+    ("acknowledged", False),
+    ("claimed_during_confirm", False),
+])
+def test_ghasr107_idle_recycle_aborts_when_github_already_handed_over_a_job(tmp_path, state, shutdown):
+    diag = tmp_path / "diag"
+    diag.mkdir()
+    log = diag / "Runner_test.log"
+    script = idle_watchdog_script(tmp_path)
+    script = script.replace("/home/ubuntu/actions-runner/_diag", str(diag))
+    script = script.replace("/tmp/job_start.ts", str(tmp_path / "started"))
+
+    log.write_text("Listening for Jobs\n")
+    if state == "job_hook_ran":
+        (tmp_path / "started").write_text("1000")
+    elif state == "job_request_received":
+        log.write_text(f"Listening for Jobs\n{CLAIM}\n")
+    elif state == "acknowledged":
+        log.write_text("Listening for Jobs\nAcknowledging runner request '42'.\n")
+
+    # GitHub hands the job over after the deadline fires, inside the confirm window.
+    arrival = (f"if [[ $naps == 2 ]]; then printf '{CLAIM}\\n' >> {log}; fi"
+               if state == "claimed_during_confirm" else "")
+
+    result = bash(f'''
+        naps=0
+        waits=""
+        sleep() {{ naps=$((naps + 1)); waits="$waits $1"; {arrival} }}
+        send_metrics() {{ printf '%s\\n' "$*"; }}
+        send_logs() {{ printf '%s\\n' "$*"; }}
+        sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
+        pgrep() {{ return {0 if state == "worker_running" else 1}; }}
+        RUNNER_NAME=test-runner
+    ''' + script + '''
+        await_worker_or_recycle() { printf 'handoff\\n'; }
+        idle_watchdog
+        printf "waits:%s\\n" "$waits"
+    ''')
+
+    assert ("shutdown:poweroff" in result.stdout) == shutdown
+    assert ("idle_timeout_aborted" in result.stdout) == (not shutdown)
+    assert ("handoff" in result.stdout) == (not shutdown)
+
+    # The deadline is jittered so spares booted together do not expire in lockstep.
+    deadline = int(result.stdout.split("waits:", 1)[1].split()[0])
+    assert 300 <= deadline < 420
+
+
+@pytest.mark.parametrize("worker_appears,shutdown", [(True, False), (False, True)])
+def test_ghasr107_claimed_job_without_a_worker_cannot_park_the_vm_forever(tmp_path, worker_appears, shutdown):
+    script = idle_watchdog_script(tmp_path)
+    # The worker shows up on the third poll, or never shows up at all.
+    pgrep = "polls=$((polls + 1)); [[ $polls -ge 3 ]]" if worker_appears else "return 1"
+
+    result = bash(f'''
+        tick=1000
+        polls=0
+        date() {{ echo "$tick"; }}
+        sleep() {{ tick=$((tick + $1)); (( tick <= 2000 )) || exit 77; }}
+        send_metrics() {{ printf '%s\\n' "$*"; }}
+        send_logs() {{ printf '%s\\n' "$*"; }}
+        sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
+        pgrep() {{ {pgrep}; }}
+        RUNNER_NAME=test-runner
+    ''' + script + "\nawait_worker_or_recycle\n", check=False)
+
+    assert ("shutdown:poweroff" in result.stdout) == shutdown
+    assert ("claim_without_worker" in result.stdout) == shutdown
+    assert result.returncode == 0
+
+
 @pytest.mark.parametrize("exit_status", [0, 17])
 def test_foreground_runner_exit_status_is_preserved(tmp_path, exit_status):
     rendered = render(tmp_path, payload())
