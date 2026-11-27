@@ -337,6 +337,55 @@ function provision_watchdog() {
 }
 provision_watchdog &
 
+# GHASR-107: measured on a live runner, the listener acknowledges the job 1.9s
+# before Runner.Worker exists, so the ack is the only signal that beats pgrep.
+# It sits behind a server flag, so keep JobDispatcher's own line as a fallback.
+function job_in_flight() {
+	[[ -f /tmp/job_start.ts ]] && return 0
+	pgrep -f '[R]unner\.Worker' >/dev/null && return 0
+	grep -qsE "Acknowledging runner request|Job request [0-9]+ for plan " \
+		/home/ubuntu/actions-runner/_diag/Runner_*.log
+}
+
+# GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
+# that handoff so a claim that never produces a worker cannot park the VM here
+# forever waiting for something that is not coming.
+function await_worker_or_recycle() {
+	local deadline=$(( $(date +%s) + 300 ))
+	while [[ $(date +%s) -lt $deadline ]]; do
+		pgrep -f '[R]unner\.Worker' >/dev/null && return
+		sleep 10
+	done
+
+	send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:claim_without_worker"
+	send_logs runner_log 'Job claimed but no worker started within 300 seconds, powering off for rebuild'
+	sleep 2 # let the UDP metric leave before the interface goes down
+	sudo poweroff
+}
+
+# GHASR-107: a warm spare stays dispatchable until the instant it powers off, so
+# confirm it is still idle over a window rather than once, and jitter the
+# deadline so spares booted together do not expire into one burst of work.
+function idle_watchdog() {
+	local waited=$((300 + RANDOM % 120))
+	sleep $waited
+
+	for _ in 1 2 3; do
+		if job_in_flight; then
+			send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:idle_timeout_aborted"
+			send_logs runner_log 'Job claimed while the idle timer fired, cancelling recycle'
+			await_worker_or_recycle
+			return
+		fi
+		sleep 5
+	done
+
+	send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:idle_timeout"
+	send_logs runner_log "No job started within $waited seconds of listening, powering off for reassignment"
+	sleep 2 # let the UDP metric leave before the interface goes down
+	sudo poweroff
+}
+
 export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/ubuntu/actions-runner/start.sh
 export ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/ubuntu/actions-runner/stop.sh
 idle_watchdog_started=false
@@ -344,17 +393,9 @@ IFS=$'\r\n'
 ./run.sh | grep --line-buffered -vE "^[ \t|/_\\()',\.\-]*$" | grep --line-buffered -vF 'Self-hosted runner registration' | while read -r line; do
 	echo "$line"
 	send_logs runner_log "$line"
-	# Recycle a runner that has not started its first job after five minutes online.
 	if [[ $idle_watchdog_started == false && "$line" == *"Listening for Jobs"* ]]; then
 		idle_watchdog_started=true
-		(
-			sleep 300
-			if [[ ! -f /tmp/job_start.ts ]] && ! pgrep -f '[R]unner\.Worker' >/dev/null; then
-				send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:idle_timeout"
-				send_logs runner_log 'No job started within 300 seconds of listening, powering off for reassignment'
-				sudo poweroff
-			fi
-		) &
+		idle_watchdog &
 	fi
 done
 # GHASR-97: capture run.sh's status before anything else runs. This used to read
