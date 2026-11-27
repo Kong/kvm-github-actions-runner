@@ -340,25 +340,50 @@ provision_watchdog &
 # GHASR-107: measured on a live runner, the listener acknowledges the job 1.9s
 # before Runner.Worker exists, so the ack is the only signal that beats pgrep.
 # It sits behind a server flag, so keep JobDispatcher's own line as a fallback.
+function claim_count() {
+	grep -hoE "Acknowledging runner request|Job request [0-9]+ for plan " \
+		/home/ubuntu/actions-runner/_diag/Runner_*.log 2>/dev/null | wc -l
+}
+
+# A claim is never removed from the log, so this answers "has this runner been
+# handed a job at all", which is what the idle deadline needs. Waiting on one
+# specific claim has to compare counts instead - see await_worker_or_recycle.
 function job_in_flight() {
 	[[ -f /tmp/job_start.ts ]] && return 0
 	pgrep -f '[R]unner\.Worker' >/dev/null && return 0
-	grep -qsE "Acknowledging runner request|Job request [0-9]+ for plan " \
-		/home/ubuntu/actions-runner/_diag/Runner_*.log
+	[[ $(claim_count) -gt 0 ]]
 }
 
 # GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
 # that handoff so a claim that never produces a worker cannot park the VM here
 # forever waiting for something that is not coming.
+#
+# The deadline has to clear a healthy retry storm, or it kills a job that was
+# still coming. GetJobMessageAsync is wrapped in RetryRequest with maxAttempts=5
+# and a 5-15s backoff, over an HTTP layer whose SendTimeout is 100s, so the
+# worst case a working runner can legitimately spend here is 5*100 + 4*15 = 560s.
+#
+# A 404/409/422 on that fetch sends the listener back to listening, so the claim
+# can evaporate and the runner go on serving. Restart the wait on a fresh claim
+# rather than powering off underneath it, and re-check right before giving up.
 function await_worker_or_recycle() {
-	local deadline=$(( $(date +%s) + 300 ))
-	while [[ $(date +%s) -lt $deadline ]]; do
+	local limit=900 seen deadline now
+	seen=$(claim_count)
+	deadline=$(( $(date +%s) + limit ))
+
+	while true; do
 		pgrep -f '[R]unner\.Worker' >/dev/null && return
+		now=$(claim_count)
+		if [[ $now -gt $seen ]]; then
+			seen=$now
+			deadline=$(( $(date +%s) + limit ))
+		fi
+		[[ $(date +%s) -ge $deadline ]] && break
 		sleep 10
 	done
 
 	send_metrics runners.anomaly "1" "c" "#runner_name:$RUNNER_NAME,#type:claim_without_worker"
-	send_logs runner_log 'Job claimed but no worker started within 300 seconds, powering off for rebuild'
+	send_logs runner_log "Job claimed but no worker started within $limit seconds, powering off for rebuild"
 	sleep 2 # let the UDP metric leave before the interface goes down
 	sudo poweroff
 }

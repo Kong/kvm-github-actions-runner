@@ -339,9 +339,9 @@ CLAIM = "Job request 42 for plan 7f3 job 9c1 received."
 
 def idle_watchdog_script(tmp_path):
     rendered = render(tmp_path, payload())
-    body = rendered.split("function job_in_flight() {", 1)[1].split(
+    body = rendered.split("function claim_count() {", 1)[1].split(
         "\nexport ACTIONS_RUNNER_HOOK_JOB_STARTED", 1)[0]
-    return "function job_in_flight() {" + body
+    return "function claim_count() {" + body
 
 
 @pytest.mark.parametrize("state,shutdown", [
@@ -398,24 +398,72 @@ def test_ghasr107_idle_recycle_aborts_when_github_already_handed_over_a_job(tmp_
 
 @pytest.mark.parametrize("worker_appears,shutdown", [(True, False), (False, True)])
 def test_ghasr107_claimed_job_without_a_worker_cannot_park_the_vm_forever(tmp_path, worker_appears, shutdown):
-    script = idle_watchdog_script(tmp_path)
-    # The worker shows up on the third poll, or never shows up at all.
-    pgrep = "polls=$((polls + 1)); [[ $polls -ge 3 ]]" if worker_appears else "return 1"
+    diag = tmp_path / "diag"
+    diag.mkdir()
+    log = diag / "Runner_test.log"
+    log.write_text(f"Listening for Jobs\n{CLAIM}\n")
+    script = idle_watchdog_script(tmp_path).replace(
+        "/home/ubuntu/actions-runner/_diag", str(diag))
+    # GetJobMessageAsync retries 5 times over a 100s HTTP timeout with a 5-15s
+    # backoff, so a working runner can legitimately take 560s to reach the
+    # worker. Have it appear at 580s, past that ceiling, and it must survive.
+    pgrep = "[[ $tick -ge 1580 ]]" if worker_appears else "return 1"
 
     result = bash(f'''
         tick=1000
-        polls=0
         date() {{ echo "$tick"; }}
-        sleep() {{ tick=$((tick + $1)); (( tick <= 2000 )) || exit 77; }}
+        sleep() {{ tick=$((tick + $1)); (( tick <= 4000 )) || exit 77; }}
         send_metrics() {{ printf '%s\\n' "$*"; }}
         send_logs() {{ printf '%s\\n' "$*"; }}
         sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
         pgrep() {{ {pgrep}; }}
         RUNNER_NAME=test-runner
-    ''' + script + "\nawait_worker_or_recycle\n", check=False)
+    ''' + script + '\nawait_worker_or_recycle\nprintf "endtick:%s\\n" "$tick"\n', check=False)
 
     assert ("shutdown:poweroff" in result.stdout) == shutdown
     assert ("claim_without_worker" in result.stdout) == shutdown
+    assert result.returncode == 0
+
+    endtick = int(result.stdout.split("endtick:", 1)[1].split()[0])
+    if shutdown:
+        # Never give up before the retry ceiling a healthy runner can hit.
+        assert endtick - 1000 >= 560
+    else:
+        # A worker that turns up at 580s must not have been killed first.
+        assert endtick - 1000 >= 580
+
+
+def test_ghasr107_a_fresh_claim_restarts_the_wait_instead_of_powering_off(tmp_path):
+    """A 404/409/422 on the job fetch puts the listener back in service, so the
+    VM can be handed another job while this is still waiting. The claim line is
+    never removed from the log, so the wait has to notice a *new* one."""
+    diag = tmp_path / "diag"
+    diag.mkdir()
+    log = diag / "Runner_test.log"
+    log.write_text(f"Listening for Jobs\n{CLAIM}\n")
+    script = idle_watchdog_script(tmp_path).replace(
+        "/home/ubuntu/actions-runner/_diag", str(diag))
+
+    # GitHub hands over a second job 500s in, well before the first deadline.
+    result = bash(f'''
+        tick=1000
+        date() {{ echo "$tick"; }}
+        sleep() {{
+            tick=$((tick + $1))
+            if [[ $tick -eq 1500 ]]; then printf '{CLAIM}\\n' >> {log}; fi
+            (( tick <= 4000 )) || exit 77
+        }}
+        send_metrics() {{ printf '%s\\n' "$*"; }}
+        send_logs() {{ printf '%s\\n' "$*"; }}
+        sudo() {{ printf 'shutdown:%s\\n' "$*"; }}
+        pgrep() {{ return 1; }}
+        RUNNER_NAME=test-runner
+    ''' + script + '\nawait_worker_or_recycle\nprintf "endtick:%s\\n" "$tick"\n', check=False)
+
+    endtick = int(result.stdout.split("endtick:", 1)[1].split()[0])
+    # The original deadline was 1900; the fresh claim at 1500 must push it to 2400.
+    assert endtick >= 2400, f"gave up at {endtick}, before the restarted deadline"
+    assert "shutdown:poweroff" in result.stdout
     assert result.returncode == 0
 
 
