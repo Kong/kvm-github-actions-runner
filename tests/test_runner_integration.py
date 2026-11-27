@@ -339,9 +339,9 @@ CLAIM = "Job request 42 for plan 7f3 job 9c1 received."
 
 def idle_watchdog_script(tmp_path):
     rendered = render(tmp_path, payload())
-    body = rendered.split("function job_in_flight() {", 1)[1].split(
+    body = rendered.split("function claim_count() {", 1)[1].split(
         "\nexport ACTIONS_RUNNER_HOOK_JOB_STARTED", 1)[0]
-    return "function job_in_flight() {" + body
+    return "function claim_count() {" + body
 
 
 @pytest.mark.parametrize("state,shutdown", [

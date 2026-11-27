@@ -340,19 +340,18 @@ provision_watchdog &
 # GHASR-107: measured on a live runner, the listener acknowledges the job 1.9s
 # before Runner.Worker exists, so the ack is the only signal that beats pgrep.
 # It sits behind a server flag, so keep JobDispatcher's own line as a fallback.
-function job_in_flight() {
-	[[ -f /tmp/job_start.ts ]] && return 0
-	pgrep -f '[R]unner\.Worker' >/dev/null && return 0
-	grep -qsE "Acknowledging runner request|Job request [0-9]+ for plan " \
-		/home/ubuntu/actions-runner/_diag/Runner_*.log
-}
-
-# GHASR-107: job_in_flight only ever says "a job was claimed at some point",
-# because the log line it reads is never removed. Count the claims instead, so a
-# fresh one can be told apart from the one we are already waiting on.
 function claim_count() {
 	grep -hoE "Acknowledging runner request|Job request [0-9]+ for plan " \
 		/home/ubuntu/actions-runner/_diag/Runner_*.log 2>/dev/null | wc -l
+}
+
+# A claim is never removed from the log, so this answers "has this runner been
+# handed a job at all", which is what the idle deadline needs. Waiting on one
+# specific claim has to compare counts instead - see await_worker_or_recycle.
+function job_in_flight() {
+	[[ -f /tmp/job_start.ts ]] && return 0
+	pgrep -f '[R]unner\.Worker' >/dev/null && return 0
+	[[ $(claim_count) -gt 0 ]]
 }
 
 # GHASR-107: a claimed job owns the VM, and finishing it powers the VM off. Bound
